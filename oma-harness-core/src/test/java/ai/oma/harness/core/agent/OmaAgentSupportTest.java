@@ -161,6 +161,49 @@ class OmaAgentSupportTest {
     }
 
     @Test
+    void unchangedConfigDoesNotRebuildAgent() {
+        FakeSupport support = new FakeSupport();
+        FakeContext context = new FakeContext();
+        support.start(context);
+        int buildsAfterStart = support.buildCount();
+
+        support.deliver(userEvent("e1", Json.parse(
+                "{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}")));
+
+        assertEquals(buildsAfterStart, support.buildCount(), "same signature must not rebuild agent");
+    }
+
+    @Test
+    void changedConfigRebuildsAgent() {
+        FakeSupport support = new FakeSupport();
+        FakeContext context = new FakeContext();
+        support.start(context);
+        int buildsAfterStart = support.buildCount();
+
+        support.setSession(SessionContext.of("m", SessionContext.BACKEND_MESSAGES,
+                "changed instructions", "/work", List.of(), java.util.Map.of()));
+        support.deliver(userEvent("e2", Json.parse(
+                "{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}")));
+
+        assertEquals(buildsAfterStart + 1, support.buildCount(), "changed signature must rebuild agent once");
+    }
+
+    @Test
+    void refreshRequestedWithoutConfigChangeDoesNotRebuildAgent() {
+        FakeSupport support = new FakeSupport();
+        FakeContext context = new FakeContext();
+        support.start(context);
+        int buildsAfterStart = support.buildCount();
+
+        support.deliver(userEvent("e3", Json.parse(
+                "{\"oma_refresh_tools\":true,"
+                        + "\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}")));
+
+        assertEquals(buildsAfterStart, support.buildCount(),
+                "forced refresh with unchanged signature must sync tools only, not rebuild agent");
+    }
+
+    @Test
     void interruptDoesNotStartTurn() {
         FakeSupport support = new FakeSupport();
         FakeContext context = new FakeContext();
@@ -255,9 +298,27 @@ class OmaAgentSupportTest {
     }
 
     private static final class FakeSupport extends OmaAgentSupport {
+        private SessionContext currentSession;
+        private int buildCount = 0;
+
         FakeSupport() {
             super(testConfig(), SessionContext.of("m", SessionContext.BACKEND_MESSAGES,
                     "instructions", "/work", List.of(), java.util.Map.of()));
+            this.currentSession = SessionContext.of("m", SessionContext.BACKEND_MESSAGES,
+                    "instructions", "/work", List.of(), java.util.Map.of());
+        }
+
+        void setSession(SessionContext session) {
+            this.currentSession = session;
+        }
+
+        int buildCount() {
+            return buildCount;
+        }
+
+        @Override
+        protected SessionContext refreshSession() {
+            return currentSession;
         }
 
         private static OmaConfig testConfig() {
@@ -271,6 +332,7 @@ class OmaAgentSupportTest {
 
         @Override
         protected ReActAgent buildAgent(String systemPrompt) {
+            buildCount++;
             assertTrue(systemPrompt.contains("# Platform rules"));
             assertTrue(systemPrompt.contains("instructions"));
             return ReActAgent.builder()
@@ -283,9 +345,18 @@ class OmaAgentSupportTest {
     }
 
     private static final class CompactingSupport extends OmaAgentSupport {
+        private final SessionContext session;
+
         CompactingSupport() {
             super(testConfig(), SessionContext.of("m", SessionContext.BACKEND_MESSAGES,
                     "instructions", "/work", List.of(), java.util.Map.of()));
+            this.session = SessionContext.of("m", SessionContext.BACKEND_MESSAGES,
+                    "instructions", "/work", List.of(), java.util.Map.of());
+        }
+
+        @Override
+        protected SessionContext refreshSession() {
+            return session;
         }
 
         private static OmaConfig testConfig() {

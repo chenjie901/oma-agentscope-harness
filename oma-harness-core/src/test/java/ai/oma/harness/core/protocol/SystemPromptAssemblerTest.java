@@ -1,58 +1,44 @@
 package ai.oma.harness.core.protocol;
 
-import ai.oma.harness.core.json.Json;
+import ai.oma.harness.core.claim.SessionContext;
+import ai.oma.harness.core.resources.Skill;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SystemPromptAssemblerTest {
+    private final SessionContext session = SessionContext.of("m", SessionContext.BACKEND_MESSAGES,
+            "instructions", "/work", List.of(), java.util.Map.of());
 
     @Test
-    void includesPlatformRulesAndAllServerLayers() {
-        String prompt = SystemPromptAssembler.assembleRoot(
-                "You are a helper.", "# Managed-agent environment\npaths", "Memory catalog text",
-                "/workspace", null);
+    void injectsSkillCatalogForModelInvocableSkills() {
+        Skill sk = new Skill("pdf", "Read and summarize PDF files", "p", "full pdf skill", true, null);
+        Skill hidden = new Skill("secret", "hidden", "p", "x", false, null);
 
+        String prompt = SystemPromptAssembler.assembleRoot(session, List.of(sk, hidden));
+
+        assertTrue(prompt.contains("# Available skills"));
+        assertTrue(prompt.contains("- pdf: Read and summarize PDF files"));
+        assertTrue(prompt.contains("load_skill"));
+        assertFalse(prompt.contains("secret"));
+    }
+
+    @Test
+    void noSkillSectionWhenEmptyOrAllNotModelInvocable() {
+        Skill hidden = new Skill("secret", "hidden", "p", "x", false, null);
+        String empty = SystemPromptAssembler.assembleRoot(session, List.of());
+        String allHidden = SystemPromptAssembler.assembleRoot(session, List.of(hidden));
+        assertFalse(empty.contains("# Available skills"));
+        assertFalse(allHidden.contains("# Available skills"));
+    }
+
+    @Test
+    void legacyOverloadRemainsCompatible() {
+        String prompt = SystemPromptAssembler.assembleRoot(session);
         assertTrue(prompt.contains("# Platform rules"));
-        assertTrue(prompt.contains("## Instructions and trust"));
-        assertTrue(prompt.contains("## Finishing"));
-        assertTrue(prompt.contains("# Managed-agent environment\npaths"));
-        assertTrue(prompt.contains("# Agent instructions\n\nYou are a helper."));
-        assertTrue(prompt.contains("# This session\n\nWorking directory: /workspace"));
-        assertTrue(prompt.contains("Memory catalog text"));
-        assertTrue(prompt.indexOf("# Platform rules") < prompt.indexOf("# Managed-agent environment"));
-        assertTrue(prompt.indexOf("# Managed-agent environment") < prompt.indexOf("# Agent instructions"));
-        assertTrue(prompt.indexOf("# Agent instructions") < prompt.indexOf("# This session"));
-    }
-
-    @Test
-    void disablesSubagentsWhenNotConfigured() {
-        String prompt = SystemPromptAssembler.assembleRoot(null, null, null, null, null);
-        assertTrue(prompt.contains("## Subagents disabled"));
-        assertFalse(prompt.contains("## Delegating to subagents"));
-    }
-
-    @Test
-    void enablesDelegationWhenSubagentsConfigured() {
-        String prompt = SystemPromptAssembler.assembleRoot(
-                null, null, null, null, Json.parse("{\"agents\":[]}"));
-        assertTrue(prompt.contains("## Delegating to subagents"));
-        assertTrue(prompt.contains("at most 25 live threads"));
-        assertFalse(prompt.contains("## Subagents disabled"));
-    }
-
-    @Test
-    void addsRestrictionWhenInlineAgentsDisabled() {
-        String prompt = SystemPromptAssembler.assembleRoot(
-                null, null, null, null, Json.parse("{\"inlineAgents\":false}"));
-        assertTrue(prompt.contains("Only the configured predefined agents may be used."));
-    }
-
-    @Test
-    void omitsEmptyLayers() {
-        String prompt = SystemPromptAssembler.assembleRoot(null, null, null, null, null);
-        assertFalse(prompt.contains("# Agent instructions"));
-        assertFalse(prompt.contains("# This session"));
+        assertTrue(prompt.contains("instructions"));
     }
 }

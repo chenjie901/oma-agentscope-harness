@@ -19,9 +19,11 @@ import io.agentscope.core.tool.ToolCallParam;
 import io.agentscope.core.tool.Toolkit;
 import reactor.core.publisher.Mono;
 
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +43,7 @@ public final class OmaToolkit {
     private final Toolkit toolkit = new Toolkit();
     private final ToolRunner runner;
     private final Map<String, AgentTool> registered = new LinkedHashMap<>();
+    private final Set<String> frameworkTools = new HashSet<>();
 
     public OmaToolkit(AgentContext context, Supplier<SessionContext> sessions) {
         this.runner = new ToolRunner(context, sessions);
@@ -54,6 +57,18 @@ public final class OmaToolkit {
         return toolkit;
     }
 
+    /** 注册一个框架内置工具（如 skill 加载器），不受 runtime_tools 白名单约束。 */
+    public synchronized void registerFrameworkTool(AgentTool tool) {
+        if (tool == null || tool.getName() == null || tool.getName().isBlank()) {
+            return;
+        }
+        if (!registered.containsKey(tool.getName())) {
+            toolkit.registerAgentTool(tool);
+            registered.put(tool.getName(), tool);
+        }
+        frameworkTools.add(tool.getName());
+    }
+
     /** 按会话上下文与 MCP 工具列表同步工具注册，由 core 在启动与权限刷新时调用。 */
     public synchronized void sync(SessionContext context, List<McpToolBinding> mcpTools) {
         List<ToolSpec> enabled = ToolCatalog.enabled(context, mcpTools);
@@ -62,7 +77,7 @@ public final class OmaToolkit {
             keep.put(spec.name(), spec);
         }
         for (Map.Entry<String, AgentTool> entry : List.copyOf(registered.entrySet())) {
-            if (!keep.containsKey(entry.getKey())) {
+            if (!keep.containsKey(entry.getKey()) && !frameworkTools.contains(entry.getKey())) {
                 toolkit.removeTool(entry.getKey());
                 registered.remove(entry.getKey());
             }

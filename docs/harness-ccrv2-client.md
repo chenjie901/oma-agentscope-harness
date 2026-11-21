@@ -94,8 +94,9 @@ sequenceDiagram
 2. environment prompt：server 的 `append_system_prompt`（`# Managed-agent environment`，含沙箱路径/网络/持久化规则）。
 3. agent instructions：server 的 `system_prompt` / `custom_system_prompt`，包在 `# Agent instructions` 标题下。
 4. session：`<cwd>` 写成 `# This session\n\nWorking directory: <cwd>`，后接 `memory_catalog_prompt`。
+5. skills：`assembleRoot(session, List<Skill>)` 在当前会话存在 `modelInvocable` 的 skill 时追加 `# Available skills` 摘要（`- name: description`），并提示用 `load_skill(name)` 读取正文；无可用 skill 时不追加该层。
 
-`SessionContext` 分别暴露 `agentInstructions()` / `environmentPrompt()` / `memoryCatalogPrompt()` / `cwd()` / `subagents()`；原 `systemPrompt()` 保留为拼接兼容字段，不再作为最终 prompt。单测 `SystemPromptAssemblerTest` 锁定层顺序、subagents 开关与空层跳过。
+`SessionContext` 分别暴露 `agentInstructions()` / `environmentPrompt()` / `memoryCatalogPrompt()` / `cwd()` / `subagents()` / `runtimeSkills()`；原 `systemPrompt()` 保留为拼接兼容字段，不再作为最终 prompt。skills 由 `AgentContext.skills()`（`GET /v2/sessions/{id}/skills`）提供，`OmaSkillTool`（框架内置、不受 runtime_tools 白名单约束）按名称返回 skill 的 `content` 作为 SKILL.md 正文，对齐 DSH 的 ToolSkill 语义。单测 `SystemPromptAssemblerTest`、`OmaSkillToolTest` 锁定层顺序、skill 过滤与按需加载。
 - `set_model`：先 `PUT /worker` 落 `external_metadata.model`，成功后再切换 `OmaChatModel`，最后回 `success`。任何一步失败都回 `error`，避免服务端与 harness 模型状态分叉。
 - 上行审批：`control_request` 只发 `subtype=can_use_tool`，携带 `tool_name`、`tool_use_id` 与原始 `input`；`control_response` 解析 `behavior`、`updatedInput`、`message`/`denyMessage`、`externalResult`。
 - 审批状态：发出审批请求时 `PUT /worker` 报 `worker_status=requires_action` 并带 `requires_action_details`（tool_name/tool_use_id/session_thread_id）；审批结束（回答、超时、中断）且无其它待审批时恢复 `running`。
@@ -147,8 +148,9 @@ flowchart LR
 - `AskUserQuestion` 只接受 `externalResult`：缺少时报 `Missing user question result`；答案要求数量与 id 一一对应、`selected` 去重且属于 `options[].label`、单选不允许同时给选项与自定义答案。
 - `web_search` / `web_fetch` 超时 35s；响应含 `full_content` 时通过 `Write` 工具把 `{...page, content: full_content, truncated: false}` 写入 `/tmp/tool-outputs/mcp_<uuid>.txt` 并回填 `output_file`，写失败只留预览并给出 `storage_error`。
 - `get_port_url` 先校验 `1 <= port <= 65535`，再以 10s 超时请求服务端；错误文案与服务端一致（`OMA port URL HTTP <status>: <message>`）。
-- `user.message.oma_refresh_tools == true` 时，回合开始前用 `X-OMA-Session-Thread-ID` 重新拉取 `GET /v2/sessions/{id}`，同步 `runtime_tools` 与权限：新增工具注册、消失工具移除。
-- 每次模型请求前都会重新拉取 `runtime_tool_permissions`（对齐 dsh 的 `agent/request` 钩子），因此前端修改权限后下一轮即生效；`runtime_tools` 只在 `oma_refresh_tools` 时同步，避免模型可见工具在回合中途变化。
+- **动态配置对齐（每条 user.message 入口）**：`OmaAgentSupport.applyConfigIfChanged` 用 `X-OMA-Session-Thread-ID` 拉取一次 `GET /v2/sessions/{id}`，计算 `SessionContext.signature()`（覆盖 system prompt 各层、cwd、runtime_tools、mcp_config、subagents、runtime_skills）。签名变化才刷新 MCP、`toolkit.sync`、重拼 prompt 并重建 `ReActAgent`（从旧 agent state 迁移完整消息历史、保留去重状态与 streamPublisher）。签名未变但带 `oma_refresh_tools=true`（服务端 `system_context.go` 对每条 user.message 无条件注入，DSH 兼容）时只同步 MCP/工具/skill 索引，不重建 agent；签名未变且无该标记时只更新 session 引用。这样既保留"每条消息刷新工具"的 DSH 语义，又避免每轮无谓重建。
+- 每次模型请求前的 `refreshPermissions` 在同一轮内复用入口已拉取的 session_context，不重复请求；非 user.message 触发的模型调用（如 compaction）仍会兜底拉取。
+- `SessionContext.refresh` 可通过 `OmaAgentSupport.refreshSession()` 覆写，便于测试注入固定上下文。
 - 会话上下文解析 fail-closed：`runtime_tools` 元素非字符串、`runtime_tool_permissions` 值不在 `allow|ask|deny` 内都视为协议错误，直接终止当前会话。
 
 ## 5. 投递回执状态机

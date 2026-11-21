@@ -12,6 +12,7 @@ import ai.oma.harness.core.model.ModelRequest;
 import ai.oma.harness.core.protocol.CanonicalEvent;
 import ai.oma.harness.core.protocol.SystemPromptAssembler;
 import ai.oma.harness.core.protocol.Transcript;
+import ai.oma.harness.core.resources.Skill;
 import ai.oma.harness.core.transport.InboundEvent;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.agentscope.core.ReActAgent;
@@ -111,6 +112,9 @@ public abstract class OmaAgentSupport implements HarnessAgent {
     private OmaChatModel chatModel;
     private OmaToolkit toolkit;
     private ReActAgent agent;
+    private String configuredSignature;
+    private volatile Map<String, Skill> skillIndex = Map.of();
+    private volatile boolean configRefreshedThisTurn;
 
     /**
      * 由 runner 在 claim 到会话后调用，接入方无需关心。
@@ -141,17 +145,34 @@ public abstract class OmaAgentSupport implements HarnessAgent {
         this.chatModel.onRequest(this::refreshPermissions);
         this.toolkit = new OmaToolkit(context, () -> session);
         this.streamPublisher = new StreamEventPublisher(context, config.sessionId());
+        this.toolkit.registerFrameworkTool(new OmaSkillTool(() -> skillIndex));
         context.refreshMcp(session, context.threadId());
         this.toolkit.sync(session, context.mcpTools());
+        this.skillIndex = indexSkills(context.skills());
         this.agent = buildAgent(assemblePrompt(session));
+        this.configuredSignature = session.signature();
         restoreMessages(context.restoredMessages());
+    }
+
+    private static Map<String, Skill> indexSkills(List<Skill> skills) {
+        if (skills == null || skills.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Skill> index = new HashMap<>();
+        for (Skill skill : skills) {
+            if (skill != null && skill.name() != null && !skill.name().isBlank()) {
+                index.put(skill.name(), skill);
+            }
+        }
+        return Map.copyOf(index);
     }
 
     /**
      * 组装 System prompt。默认按 DSH 规范组装；接入方通常无需覆写，如需自定义可覆写此方法。
      */
     protected String assemblePrompt(SessionContext session) {
-        return SystemPromptAssembler.assembleRoot(session);
+        List<Skill> skills = context == null ? List.of() : context.skills();
+        return SystemPromptAssembler.assembleRoot(session, skills == null ? List.of() : skills);
     }
 
     /**
@@ -228,9 +249,9 @@ public abstract class OmaAgentSupport implements HarnessAgent {
         }
         log.info("turn start event={} text_length={} blocks={} thread={}",
                 event.eventId(), text.length(), content.size(), context.threadId());
-        if (refreshRequested(event.payload())) {
-            refreshTools();
-        }
+        boolean forceRefresh = refreshRequested(event.payload());
+        configRefreshedThisTurn = false;
+        applyConfigIfChanged(forceRefresh);
         context.persistInternal(Transcript.user(event.eventId(), text));
         context.emit(new CanonicalEvent.TurnStarted(context.threadId()));
         context.emit(new CanonicalEvent.SessionRunning());
@@ -368,19 +389,101 @@ public abstract class OmaAgentSupport implements HarnessAgent {
         }
     }
 
+    /**
+     * 在用户消息边界按 DSH refresh 语义对齐配置：拉取一次 session_context 并计算签名。
+     * 服务端对每条 user.message 注入 oma_refresh_tools=true（DSH 兼容），因此 force 很常见；
+     * 仅在配置签名真正变化时才重建 agent，force 但签名未变时只同步工具/MCP 与 skill 索引，
+     * 避免每轮重建 agent 的开销与历史迁移风险。
+     */
+    private void applyConfigIfChanged(boolean force) {
+        if (context == null) {
+            return;
+        }
+        SessionContext refreshed = refreshSession();
+        configRefreshedThisTurn = true;
+        String nextSignature = refreshed.signature();
+        boolean changed = configuredSignature == null || !configuredSignature.equals(nextSignature);
+        if (changed) {
+            log.info("session config changed, rebuilding agent thread={} force={} old={} new={}",
+                    context.threadId(), force, configuredSignature, nextSignature);
+            rebuildAgent(refreshed, nextSignature);
+            return;
+        }
+        session = refreshed;
+        if (force) {
+            syncToolsOnly(refreshed);
+        }
+    }
+
+    /** 签名未变但被强制刷新时，只同步 MCP/工具/skill 数据，不重建 agent、不迁移历史。 */
+    private void syncToolsOnly(SessionContext refreshed) {
+        context.refreshMcp(refreshed, context.threadId());
+        toolkit.sync(refreshed, context.mcpTools());
+        skillIndex = indexSkills(context.skills());
+        log.debug("tools refreshed without agent rebuild thread={} tools={} mcp={}",
+                context.threadId(), refreshed.runtimeTools().size(), context.mcpTools().size());
+    }
+
+    /** 重建 agent 并迁移历史消息；去重状态、流式发布器等跨 turn 状态保持不变。 */
+    private void rebuildAgent(SessionContext refreshed, String signature) {
+        List<Msg> history = exportHistory();
+        ReActAgent previous = agent;
+        session = refreshed;
+        configuredSignature = signature;
+        if (chatModel != null) {
+            chatModel.setModel(refreshed.model());
+        }
+        context.refreshMcp(refreshed, context.threadId());
+        toolkit.sync(refreshed, context.mcpTools());
+        List<Skill> skills = context.skills();
+        skillIndex = indexSkills(skills);
+        ReActAgent replacement = buildAgent(assemblePrompt(refreshed));
+        if (replacement == null) {
+            log.warn("buildAgent returned null on rebuild; keeping previous agent");
+            return;
+        }
+        if (history != null && !history.isEmpty()) {
+            replacement.getAgentState(runtimeContext).contextMutable().addAll(history);
+        }
+        agent = replacement;
+        if (previous != null && previous != replacement) {
+            try {
+                previous.close();
+            } catch (Exception e) {
+                log.warn("failed to close previous agent: {}", e.getMessage());
+            }
+        }
+        log.info("agent rebuilt thread={} history={} tools={} mcp={}",
+                context.threadId(), history == null ? 0 : history.size(),
+                refreshed.runtimeTools().size(), context.mcpTools().size());
+    }
+
+    private List<Msg> exportHistory() {
+        if (agent == null) {
+            return List.of();
+        }
+        try {
+            return List.copyOf(agent.getAgentState(runtimeContext).getContext());
+        } catch (RuntimeException e) {
+            log.warn("failed to export agent history: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** 模型请求前的轻量刷新：本轮已在 deliver 入口 GET 过则跳过，避免同轮重复请求。 */
     private void refreshPermissions() {
-        session = SessionContext.refresh(config, context.threadId());
+        if (configRefreshedThisTurn) {
+            return;
+        }
+        session = refreshSession();
+        configRefreshedThisTurn = true;
         log.debug("tool permissions refreshed tools={} permissions={}",
                 session.runtimeTools().size(), session.toolPermissions());
     }
 
-    private void refreshTools() {
-        SessionContext refreshed = SessionContext.refresh(config, context.threadId());
-        session = refreshed;
-        context.refreshMcp(refreshed, context.threadId());
-        toolkit.sync(refreshed, context.mcpTools());
-        log.info("tools refreshed runtime={} permissions={} mcp={}",
-                refreshed.runtimeTools(), refreshed.toolPermissions(), context.mcpTools().size());
+    /** 拉取当前 session_context；接入方可覆写以注入固定上下文或自适应刷新策略。 */
+    protected SessionContext refreshSession() {
+        return SessionContext.refresh(config, context.threadId());
     }
 
     private static boolean refreshRequested(JsonNode payload) {

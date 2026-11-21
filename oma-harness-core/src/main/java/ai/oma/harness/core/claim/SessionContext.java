@@ -1,6 +1,7 @@
 package ai.oma.harness.core.claim;
 
 import ai.oma.harness.core.OmaConfig;
+import ai.oma.harness.core.attachments.AttachmentStore;
 import ai.oma.harness.core.json.Json;
 import ai.oma.harness.core.transport.OmaHttpException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -44,18 +45,19 @@ public final class SessionContext {
     private final Map<String, String> toolPermissions;
     private final JsonNode mcpConfig;
     private final JsonNode subagents;
+    private final JsonNode runtimeSkills;
 
     private SessionContext(String model, String apiBackend, String agentInstructions, String cwd,
                            List<String> runtimeTools, Map<String, String> toolPermissions,
                            JsonNode mcpConfig, JsonNode subagents) {
         this(model, apiBackend, agentInstructions, null, null, cwd,
-                runtimeTools, toolPermissions, mcpConfig, subagents);
+                runtimeTools, toolPermissions, mcpConfig, subagents, null);
     }
 
     private SessionContext(String model, String apiBackend, String agentInstructions,
                            String environmentPrompt, String memoryCatalogPrompt, String cwd,
                            List<String> runtimeTools, Map<String, String> toolPermissions,
-                           JsonNode mcpConfig, JsonNode subagents) {
+                           JsonNode mcpConfig, JsonNode subagents, JsonNode runtimeSkills) {
         this.model = model;
         this.apiBackend = apiBackend;
         this.agentInstructions = agentInstructions;
@@ -66,6 +68,7 @@ public final class SessionContext {
         this.toolPermissions = toolPermissions;
         this.mcpConfig = mcpConfig;
         this.subagents = subagents;
+        this.runtimeSkills = runtimeSkills;
     }
 
     public static SessionContext of(String model, String apiBackend, String systemPrompt, String cwd,
@@ -125,6 +128,29 @@ public final class SessionContext {
         return subagents;
     }
 
+    public JsonNode runtimeSkills() {
+        return runtimeSkills;
+    }
+
+    /**
+     * 影响 agent 行为的配置签名：system prompt 各层、cwd、runtime_tools、mcp_config、subagents 与
+     * runtime_skills。权限变化不在此列——它由模型请求前的 refreshPermissions 单独生效，无需重建 agent。
+     * 调用方据此判断是否需要重建 agent 与同步工具，签名相同则零开销。
+     */
+    public String signature() {
+        StringBuilder seed = new StringBuilder();
+        seed.append("model=").append(model == null ? "" : model).append('\n');
+        seed.append("instructions=").append(agentInstructions == null ? "" : agentInstructions).append('\n');
+        seed.append("environment=").append(environmentPrompt == null ? "" : environmentPrompt).append('\n');
+        seed.append("memory=").append(memoryCatalogPrompt == null ? "" : memoryCatalogPrompt).append('\n');
+        seed.append("cwd=").append(cwd == null ? "" : cwd).append('\n');
+        seed.append("tools=").append(runtimeTools).append('\n');
+        seed.append("mcp=").append(mcpConfig == null ? "" : Json.write(mcpConfig)).append('\n');
+        seed.append("subagents=").append(subagents == null ? "" : Json.write(subagents)).append('\n');
+        seed.append("skills=").append(runtimeSkills == null ? "" : Json.write(runtimeSkills));
+        return AttachmentStore.sha256(seed.toString());
+    }
+
     private static SessionContext fetch(OmaConfig config, String threadId) {
         HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
         HttpRequest.Builder builder = HttpRequest.newBuilder(
@@ -175,7 +201,8 @@ public final class SessionContext {
                 runtimeTools(context.get("runtime_tools")),
                 toolPermissions(context.get("runtime_tool_permissions")),
                 objectOrEmpty(context.get("mcp_config")),
-                objectOrNull(context.get("subagents")));
+                objectOrNull(context.get("subagents")),
+                nullableNode(context.get("runtime_skills")));
     }
 
     private static List<String> runtimeTools(JsonNode node) {
@@ -219,6 +246,10 @@ public final class SessionContext {
 
     private static JsonNode objectOrNull(JsonNode node) {
         return node == null || !node.isObject() ? null : node;
+    }
+
+    private static JsonNode nullableNode(JsonNode node) {
+        return node == null || node.isNull() ? null : node;
     }
 
     private static String apiBackend(JsonNode context, String model) {

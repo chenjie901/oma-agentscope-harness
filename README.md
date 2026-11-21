@@ -109,10 +109,22 @@ sequenceDiagram
 | `model_token` | claim 响应 |
 | 模型名 | `session_context.model` |
 | 模型后端 | `session_context.models[].api_backend`（`messages` / `chat_completions`） |
-| system prompt | `session_context.system_prompt` + `append_system_prompt` |
+| system prompt | `session_context.system_prompt` + `append_system_prompt` + `memory_catalog_prompt` |
+| skills | `session_context.runtime_skills`（签名用）+ `GET /v2/sessions/{id}/skills`（目录与正文） |
 | thread id | 主线程固定 `root` |
 | 工具集合 | `session_context.runtime_tools` |
 | 工具权限 | `session_context.runtime_tool_permissions`（`allow` / `ask` / `deny`） |
+
+### 会话配置的动态对齐（对齐 DSH refresh 语义）
+
+每条 `user.message` 到达时，`OmaAgentSupport` 会拉取一次 `GET /v2/sessions/{id}`，对影响 agent 行为的字段（system prompt 各层、cwd、runtime_tools、mcp_config、subagents、runtime_skills）计算稳定签名 `SessionContext.signature()`：
+
+- **签名变化**：重拼 system prompt、刷新 MCP、`toolkit.sync` 同步工具集，并重建 `ReActAgent`。重建会从旧 agent 的 state 导出完整消息历史写入新 agent，保留去重状态与流式发布器，避免重复事件或丢失上下文。由于 AgentScope 的 `sysPrompt` 是 final，动态改 prompt 只能通过重建 agent 实现。
+- **签名未变 + `oma_refresh_tools=true`**：只做 MCP/toolkit/skill 索引同步，不重建 agent。服务端对每条 user.message 都注入该标记（DSH 兼容），因此这是最常见路径——"每条消息刷新工具"得以保留，同时避免无谓的 agent 重建与历史迁移。
+- **签名未变且无强制刷新**：只更新 session 引用，让权限变化低成本生效，热路径零开销。
+- 模型请求前的 `refreshPermissions` 在同一轮内复用入口已拉取的 session_context，不重复请求。
+
+**skills**：`runtime_skills` 纳入签名；服务端 `GET /v2/sessions/{id}/skills` 返回的 skill 目录中 `modelInvocable` 的条目以 `# Available skills` 摘要注入 system prompt，模型通过框架内置工具 `load_skill(name)` 按需加载 SKILL.md 正文（正文直接取 skill 的 `content` 字段）。`load_skill` 不受 `runtime_tools` 白名单约束。subagents 仍只作 prompt 开关，未做完整子代理装配。
 
 ## 已实现的协议
 

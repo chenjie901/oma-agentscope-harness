@@ -1,6 +1,7 @@
 package ai.oma.harness.core.protocol;
 
 import ai.oma.harness.core.claim.SessionContext;
+import ai.oma.harness.core.resources.Skill;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.ArrayList;
@@ -102,8 +103,15 @@ public final class SystemPromptAssembler {
     }
 
     public static String assembleRoot(SessionContext session) {
-        return assembleRoot(session.agentInstructions(), session.environmentPrompt(),
+        return assembleRoot(session, List.of());
+    }
+
+    /** 按 DSH 语义组装 root prompt，并追加当前会话可用的 skill 目录摘要（仅 modelInvocable 的 skill）。 */
+    public static String assembleRoot(SessionContext session, List<Skill> skills) {
+        String base = assembleRoot(session.agentInstructions(), session.environmentPrompt(),
                 session.memoryCatalogPrompt(), session.cwd(), session.subagents());
+        String catalog = skillCatalog(skills);
+        return catalog == null ? base : join(base, catalog);
     }
 
     public static String assembleRoot(String agentInstructions, String environmentPrompt,
@@ -118,6 +126,27 @@ public final class SystemPromptAssembler {
         addSection(layers, "Agent instructions", agentInstructions);
         add(layers, sessionPrompt(cwd, memoryCatalogPrompt));
         return join(layers.toArray(String[]::new));
+    }
+
+    private static String skillCatalog(List<Skill> skills) {
+        if (skills == null || skills.isEmpty()) {
+            return null;
+        }
+        List<String> lines = new ArrayList<>();
+        for (Skill skill : skills) {
+            if (skill == null || !skill.modelInvocable() || skill.name() == null || skill.name().isBlank()) {
+                continue;
+            }
+            String description = skill.description() == null || skill.description().isBlank()
+                    ? "" : ": " + skill.description().trim();
+            lines.add("- " + skill.name().trim() + description);
+        }
+        if (lines.isEmpty()) {
+            return null;
+        }
+        return "# Available skills\n\nThe following skills are available. Use the load_skill tool with the exact "
+                + "skill name to read its full instructions when it matches your task.\n\n"
+                + String.join("\n", lines);
     }
 
     private static String sessionPrompt(String cwd, String memory) {
