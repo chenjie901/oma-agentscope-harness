@@ -1,6 +1,7 @@
 package ai.oma.harness.core.tools;
 
 import ai.oma.harness.core.claim.SessionContext;
+import ai.oma.harness.core.tools.mcp.McpToolBinding;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -14,7 +15,7 @@ public final class ToolCatalog {
     public static final String PERMISSION_DENY = "deny";
 
     public enum Kind {
-        SANDBOX, WEB, PORT, QUESTION
+        SANDBOX, WEB, PORT, QUESTION, MCP
     }
 
     public record ToolSpec(String name, String runtimeName, String permissionKey, Kind kind,
@@ -105,16 +106,33 @@ public final class ToolCatalog {
     }
 
     public static List<ToolSpec> enabled(SessionContext context) {
-        if (context == null || context.runtimeTools().isEmpty()) {
-            return List.of();
-        }
+        return enabled(context, List.of());
+    }
+
+    public static List<ToolSpec> enabled(SessionContext context, List<McpToolBinding> mcpTools) {
         List<ToolSpec> enabled = new ArrayList<>();
-        for (ToolSpec spec : ALL) {
-            if (containsTool(context.runtimeTools(), spec) && !PERMISSION_DENY.equals(permission(context, spec))) {
-                enabled.add(spec);
+        if (context != null && !context.runtimeTools().isEmpty()) {
+            for (ToolSpec spec : ALL) {
+                if (containsTool(context.runtimeTools(), spec) && !PERMISSION_DENY.equals(permission(context, spec))) {
+                    enabled.add(spec);
+                }
+            }
+        }
+        if (mcpTools != null) {
+            for (McpToolBinding binding : mcpTools) {
+                ToolSpec spec = mcpSpec(binding);
+                if (!PERMISSION_DENY.equals(permission(context, spec))) {
+                    enabled.add(spec);
+                }
             }
         }
         return List.copyOf(enabled);
+    }
+
+    private static ToolSpec mcpSpec(McpToolBinding binding) {
+        Map<String, Object> schema = binding.schemaMap();
+        return new ToolSpec(binding.displayName(), binding.displayName(), binding.displayName(),
+                Kind.MCP, binding.description(), schema, binding.displayName(), false);
     }
 
     public static ToolSpec byName(String name) {

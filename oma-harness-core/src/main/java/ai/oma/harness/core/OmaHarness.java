@@ -19,6 +19,12 @@ import ai.oma.harness.core.tools.OmaPortClient;
 import ai.oma.harness.core.tools.OmaToolClient;
 import ai.oma.harness.core.tools.OmaWebClient;
 import ai.oma.harness.core.tools.ToolResult;
+import ai.oma.harness.core.tools.mcp.ExternalMcpRegistry;
+import ai.oma.harness.core.tools.mcp.McpToolBinding;
+import ai.oma.harness.core.claim.SessionContext;
+import ai.oma.harness.core.observability.DiagnosticsReporter;
+import ai.oma.harness.core.observability.OtlpExporter;
+import ai.oma.harness.core.attachments.AttachmentStore;
 import ai.oma.harness.core.transport.InboundEvent;
 import ai.oma.harness.core.transport.OmaHttpException;
 import ai.oma.harness.core.transport.SseParser;
@@ -53,13 +59,17 @@ public final class OmaHarness implements AutoCloseable {
 
     private final OmaConfig config;
     private final HarnessAgent agent;
-    private final OmaEventMapper mapper = new OmaEventMapper();
+    private final OmaEventMapper mapper;
     private final WorkerTransport transport;
     private final OmaToolClient tools;
     private final OmaWebClient web;
     private final OmaPortClient ports;
     private final OmaModelClient models;
     private final OmaResourceLoader resources;
+    private final ExternalMcpRegistry mcpRegistry;
+    private final DiagnosticsReporter diagnostics;
+    private final OtlpExporter otlp;
+    private final AttachmentStore attachments;
     private final ScheduledExecutorService scheduler;
     private final ExecutorService turns;
     private final AtomicBoolean closed = new AtomicBoolean(false);
@@ -82,12 +92,19 @@ public final class OmaHarness implements AutoCloseable {
         this.config = config;
         this.agent = agent;
         this.epoch = config.workerEpoch();
+        this.mapper = new OmaEventMapper(config.sessionId());
         this.transport = new WorkerTransport(config);
         this.tools = new OmaToolClient(config);
         this.web = new OmaWebClient(config, this::saveSandboxOutput);
         this.ports = new OmaPortClient(config);
         this.models = new OmaModelClient(config);
         this.resources = new OmaResourceLoader(config);
+        this.mcpRegistry = new ExternalMcpRegistry(config);
+        boolean observability = Boolean.parseBoolean(
+                System.getenv().getOrDefault("OMA_OBSERVABILITY_ENABLED", "false"));
+        this.diagnostics = new DiagnosticsReporter(transport, () -> epoch, observability);
+        this.otlp = new OtlpExporter(transport, () -> epoch, observability);
+        this.attachments = new AttachmentStore(transport, () -> epoch);
         this.scheduler = Executors.newScheduledThreadPool(3, runnable -> {
             Thread thread = new Thread(runnable, "oma-harness-scheduler");
             thread.setDaemon(true);
@@ -119,6 +136,7 @@ public final class OmaHarness implements AutoCloseable {
                 config.heartbeatInterval().toMillis(), config.heartbeatInterval().toMillis(), TimeUnit.MILLISECONDS);
         scheduler.scheduleWithFixedDelay(this::watchdog,
                 config.streamIdleTimeout().toMillis(), 1000, TimeUnit.MILLISECONDS);
+        scheduler.scheduleWithFixedDelay(this::keepAliveSafely, 30_000, 30_000, TimeUnit.MILLISECONDS);
         heartbeatSafely();
         while (!closed.get()) {
             try {
@@ -300,6 +318,7 @@ public final class OmaHarness implements AutoCloseable {
             emitTurnResult(startedAt);
         } catch (Exception e) {
             LOG.warn("harness failed to handle event " + event.eventId(), e);
+            diagnostics.event("oma_runtime_event", "OmaHarness.deliver");
             InternalEventStore store = internalEvents;
             if (store != null && store.isTerminal()) {
                 close();
@@ -388,6 +407,21 @@ public final class OmaHarness implements AutoCloseable {
         }
     }
 
+    private void keepAliveSafely() {
+        if (closed.get() || activeStream == null) {
+            return;
+        }
+        ObjectNode payload = Json.object();
+        payload.put("type", "keep_alive");
+        payload.put("uuid", java.util.UUID.randomUUID().toString());
+        try {
+            transport.emit(epoch, List.of(new WorkerTransport.OutboundEvent(payload, true)));
+            LOG.debug("keep_alive emitted epoch={}", epoch);
+        } catch (OmaHttpException e) {
+            LOG.debug("keep_alive rejected: {}", e.getMessage());
+        }
+    }
+
     private void heartbeatSafely() {
         if (closed.get()) {
             return;
@@ -459,6 +493,7 @@ public final class OmaHarness implements AutoCloseable {
         if (store != null) {
             store.close();
         }
+        mcpRegistry.close();
         try {
             agent.close();
         } catch (Exception e) {
@@ -531,6 +566,41 @@ public final class OmaHarness implements AutoCloseable {
         @Override
         public ToolResult portUrl(int port, String threadId) {
             return ports.call(port, threadId);
+        }
+
+        @Override
+        public List<McpToolBinding> mcpTools() {
+            return mcpRegistry.bindings();
+        }
+
+        @Override
+        public ToolResult mcpTool(String displayName, JsonNode input, String threadId) {
+            return mcpRegistry.call(displayName, input, threadId);
+        }
+
+        @Override
+        public String persistToolOutput(String content, String threadId) {
+            return saveSandboxOutput(content, threadId);
+        }
+
+        @Override
+        public void refreshMcp(SessionContext session, String threadId) {
+            mcpRegistry.refresh(session, threadId);
+        }
+
+        @Override
+        public DiagnosticsReporter diagnostics() {
+            return diagnostics;
+        }
+
+        @Override
+        public OtlpExporter otlp() {
+            return otlp;
+        }
+
+        @Override
+        public AttachmentStore attachments() {
+            return attachments;
         }
 
         @Override

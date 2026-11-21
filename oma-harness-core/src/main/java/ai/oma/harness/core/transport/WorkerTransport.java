@@ -236,6 +236,84 @@ public final class WorkerTransport {
                 Json.text(response, "worker_lease_expires_at"));
     }
 
+    public void reportDiagnostics(long epoch, List<JsonNode> lines) {
+        track(epoch);
+        ObjectNode body = Json.object();
+        body.put("session_id", config.sessionId());
+        body.put("worker_epoch", epoch);
+        body.set("lines", Json.array().addAll(lines));
+        post(config.workerUri("diagnostics"), body);
+        LOG.debug("worker diagnostics reported epoch={} lines={}", epoch, lines.size());
+    }
+
+    public void uploadImageAttachment(long epoch, String sha256, byte[] bytes, String mediaType) {
+        track(epoch);
+        HttpRequest request = base(config.workerUri("image-attachments/" + sha256))
+                .header("Content-Type", mediaType == null || mediaType.isBlank() ? "application/octet-stream" : mediaType)
+                .timeout(config.requestTimeout())
+                .PUT(HttpRequest.BodyPublishers.ofByteArray(bytes))
+                .build();
+        sendBytes(request);
+        LOG.debug("worker image attachment uploaded sha={} bytes={}", sha256, bytes.length);
+    }
+
+    public byte[] readMessageAttachment(long epoch, String fileId) {
+        track(epoch);
+        HttpRequest request = base(config.workerUri("message-attachments/" + fileId + "/content"))
+                .header("Accept", "*/*")
+                .timeout(config.requestTimeout())
+                .GET()
+                .build();
+        try {
+            HttpResponse<byte[]> response = http.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            if (response.statusCode() >= 300) {
+                throw error(response.statusCode(), new String(response.body(), StandardCharsets.UTF_8));
+            }
+            return response.body();
+        } catch (IOException e) {
+            throw new OmaHttpException(0, "transport_error", "attachment read failed: " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new OmaHttpException(0, "interrupted", "attachment read interrupted");
+        }
+    }
+
+    public JsonNode sendOtlp(long epoch, String kind, byte[] bytes, String contentType) {
+        track(epoch);
+        HttpRequest request = base(config.workerUri("otlp/v1/" + kind))
+                .header("Content-Type", contentType)
+                .timeout(Duration.ofSeconds(2))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(bytes))
+                .build();
+        try {
+            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                throw error(response.statusCode(), response.body());
+            }
+            return response.body() == null || response.body().isBlank()
+                    ? Json.object() : Json.parse(response.body());
+        } catch (IOException e) {
+            throw new OmaHttpException(0, "transport_error", "otlp export failed: " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new OmaHttpException(0, "interrupted", "otlp export interrupted");
+        }
+    }
+
+    private void sendBytes(HttpRequest request) {
+        try {
+            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                throw error(response.statusCode(), response.body());
+            }
+        } catch (IOException e) {
+            throw new OmaHttpException(0, "transport_error", "request failed: " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new OmaHttpException(0, "interrupted", "request interrupted");
+        }
+    }
+
     private JsonNode get(URI uri, String threadId) {
         HttpRequest.Builder builder = base(uri)
                 .header("Accept", "application/json")

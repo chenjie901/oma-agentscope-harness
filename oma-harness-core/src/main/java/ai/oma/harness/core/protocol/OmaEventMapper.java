@@ -5,11 +5,20 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 public final class OmaEventMapper {
+    private final String codeSessionId;
+
+    public OmaEventMapper(String codeSessionId) {
+        this.codeSessionId = codeSessionId;
+    }
 
     public JsonNode toOmaPayload(CanonicalEvent event) {
         if (event instanceof CanonicalEvent.Native nativeEvent) {
@@ -50,14 +59,14 @@ public final class OmaEventMapper {
             case CanonicalEvent.ToolCallStarted started -> {
                 payload.put("type", "agent.tool_use");
                 putThread(payload, started.threadId());
-                payload.put("id", started.toolCallId());
+                payload.put("id", toolUseEventId(started.toolCallId(), started.threadId()));
                 payload.put("name", started.name());
                 payload.set("input", started.input() == null ? Json.object() : started.input());
             }
             case CanonicalEvent.ToolCallCompleted completed -> {
                 payload.put("type", "agent.tool_result");
                 putThread(payload, completed.threadId());
-                payload.put("tool_use_id", completed.toolCallId());
+                payload.put("tool_use_id", toolUseEventId(completed.toolCallId(), completed.threadId()));
                 payload.put("name", completed.name());
                 payload.set("input", completed.input() == null ? Json.object() : completed.input());
                 payload.put("is_error", completed.error());
@@ -98,6 +107,22 @@ public final class OmaEventMapper {
     public static boolean isEphemeral(JsonNode payload) {
         String type = payload == null ? null : Json.text(payload, "type");
         return "event_start".equals(type) || "event_delta".equals(type);
+    }
+
+    private String toolUseEventId(String toolCallId, String threadId) {
+        String seed = codeSessionId + "\u0000public\u0000tool_use\u0000" + toolCallId;
+        if (threadId != null && !threadId.isBlank() && !"root".equals(threadId)) {
+            seed += "\u0000thread\u0000" + threadId;
+        }
+        return "sevt_" + HexFormat.of().formatHex(sha256(seed), 0, 16);
+    }
+
+    private static byte[] sha256(String value) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static void putRequestId(ObjectNode payload, String requestId) {

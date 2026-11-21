@@ -6,6 +6,7 @@ import ai.oma.harness.core.agent.HarnessAgent;
 import ai.oma.harness.core.claim.SessionContext;
 import ai.oma.harness.core.json.Json;
 import ai.oma.harness.core.protocol.CanonicalEvent;
+import ai.oma.harness.core.protocol.SystemPromptAssembler;
 import ai.oma.harness.core.protocol.Transcript;
 import ai.oma.harness.core.transport.InboundEvent;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -65,7 +66,8 @@ public final class OmaAgent implements HarnessAgent {
                 session.apiBackend());
         this.chatModel.onRequest(this::refreshPermissions);
         this.toolkit = new OmaToolkit(context, () -> session);
-        this.toolkit.sync(session);
+        context.refreshMcp(session, context.threadId());
+        this.toolkit.sync(session, context.mcpTools());
         this.agent = ReActAgent.builder()
                 .name("oma-harness")
                 .sysPrompt(prompt(session))
@@ -77,8 +79,7 @@ public final class OmaAgent implements HarnessAgent {
     }
 
     private static String prompt(SessionContext session) {
-        String systemPrompt = session.systemPrompt();
-        return systemPrompt == null || systemPrompt.isBlank() ? DEFAULT_SYSTEM_PROMPT : systemPrompt;
+        return SystemPromptAssembler.assembleRoot(session);
     }
 
     private void restore(List<Transcript.RestoredMessage> messages) {
@@ -141,9 +142,10 @@ public final class OmaAgent implements HarnessAgent {
     private void refreshTools() {
         SessionContext refreshed = SessionContext.refresh(config, context.threadId());
         session = refreshed;
-        toolkit.sync(refreshed);
-        LOG.info("tools refreshed runtime={} permissions={}",
-                refreshed.runtimeTools(), refreshed.toolPermissions());
+        context.refreshMcp(refreshed, context.threadId());
+        toolkit.sync(refreshed, context.mcpTools());
+        LOG.info("tools refreshed runtime={} permissions={} mcp={}",
+                refreshed.runtimeTools(), refreshed.toolPermissions(), context.mcpTools().size());
     }
 
     private static boolean refreshRequested(JsonNode payload) {
@@ -260,9 +262,4 @@ public final class OmaAgent implements HarnessAgent {
         }
     }
 
-    private static final String DEFAULT_SYSTEM_PROMPT = """
-            You are a coding agent running inside an OMA managed sandbox.
-            Use the provided tools for every filesystem and shell action.
-            Prefer small, verifiable steps and report outcomes precisely.
-            """;
 }

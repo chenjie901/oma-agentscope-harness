@@ -10,6 +10,7 @@ import ai.oma.harness.core.protocol.ControlPlane;
 import ai.oma.harness.core.protocol.Transcript;
 import ai.oma.harness.core.protocol.WorkerMetadata;
 import ai.oma.harness.core.resources.Skill;
+import ai.oma.harness.core.tools.ToolCatalog.ToolSpec;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
@@ -172,6 +173,37 @@ class ToolRunnerTest {
         assertEquals("port must be an integer between 1 and 65535", result.text());
     }
 
+    @Test
+    void dispatchesMcpTool() {
+        FakeContext context = new FakeContext();
+        ToolRunner runner = runner(context, Map.of("mcp__github__get_repo", "allow"));
+        ToolSpec spec = new ToolSpec("mcp__github__get_repo", "mcp__github__get_repo",
+                "mcp__github__get_repo", ToolCatalog.Kind.MCP, "get repo", Map.of(),
+                "mcp__github__get_repo", false);
+
+        ToolResult result = runner.execute(spec, "call-mcp", Json.object());
+
+        assertEquals(List.of("mcp__github__get_repo"), context.mcpCalls);
+        assertEquals("mcp result", result.text());
+    }
+
+    @Test
+    void persistsLargeMcpOutputWithPreview() {
+        FakeContext context = new FakeContext();
+        String large = "A".repeat(100_100);
+        context.mcpResult = ToolResult.text(large);
+        ToolRunner runner = runner(context, Map.of("mcp__x__big", "allow"));
+        ToolSpec spec = new ToolSpec("mcp__x__big", "mcp__x__big", "mcp__x__big",
+                ToolCatalog.Kind.MCP, "big", Map.of(), "mcp__x__big", false);
+
+        ToolResult result = runner.execute(spec, "call-big", Json.object());
+
+        assertTrue(result.text().startsWith("<persisted-output>"));
+        assertTrue(result.text().contains("/tmp/tool-outputs/mcp_test.txt"));
+        assertTrue(result.text().contains("100100 characters"));
+        assertTrue(result.text().contains("[preview middle omitted]"));
+    }
+
     private static ToolRunner runner(FakeContext context, Map<String, String> permissions) {
         SessionContext session = SessionContext.of("model", SessionContext.BACKEND_MESSAGES, null, null,
                 List.of("Bash", "web_search", "get_port_url", "ask_user_question"), permissions);
@@ -183,10 +215,13 @@ class ToolRunnerTest {
         private final List<JsonNode> inputs = new ArrayList<>();
         private final List<String> webCalls = new ArrayList<>();
         private final List<Integer> ports = new ArrayList<>();
+        private final List<String> mcpCalls = new ArrayList<>();
         private ControlPlane.Decision decision = ControlPlane.Decision.allow(null);
         private ToolResult result = ToolResult.text("sandbox result");
         private ToolResult webResult = ToolResult.text("{}");
         private ToolResult portResult = ToolResult.text("https://port.example");
+        private ToolResult mcpResult = ToolResult.text("mcp result");
+        private String persistedPath = "/tmp/tool-outputs/mcp_test.txt";
         private String approvedTool;
         private boolean cancelled;
         private boolean failCalls;
@@ -234,6 +269,17 @@ class ToolRunnerTest {
         public ToolResult portUrl(int port, String threadId) {
             ports.add(port);
             return portResult;
+        }
+
+        @Override
+        public ToolResult mcpTool(String displayName, JsonNode input, String threadId) {
+            mcpCalls.add(displayName);
+            return mcpResult;
+        }
+
+        @Override
+        public String persistToolOutput(String content, String threadId) {
+            return persistedPath;
         }
 
         @Override

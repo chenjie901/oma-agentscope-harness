@@ -29,6 +29,9 @@ public final class SessionContext {
     private final String model;
     private final String apiBackend;
     private final String systemPrompt;
+    private final String agentInstructions;
+    private final String environmentPrompt;
+    private final String memoryCatalogPrompt;
     private final String cwd;
     private final List<String> runtimeTools;
     private final Map<String, String> toolPermissions;
@@ -38,9 +41,20 @@ public final class SessionContext {
     private SessionContext(String model, String apiBackend, String systemPrompt, String cwd,
                            List<String> runtimeTools, Map<String, String> toolPermissions,
                            JsonNode mcpConfig, JsonNode subagents) {
+        this(model, apiBackend, systemPrompt, systemPrompt, null, null, cwd,
+                runtimeTools, toolPermissions, mcpConfig, subagents);
+    }
+
+    private SessionContext(String model, String apiBackend, String systemPrompt, String agentInstructions,
+                           String environmentPrompt, String memoryCatalogPrompt, String cwd,
+                           List<String> runtimeTools, Map<String, String> toolPermissions,
+                           JsonNode mcpConfig, JsonNode subagents) {
         this.model = model;
         this.apiBackend = apiBackend;
         this.systemPrompt = systemPrompt;
+        this.agentInstructions = agentInstructions;
+        this.environmentPrompt = environmentPrompt;
+        this.memoryCatalogPrompt = memoryCatalogPrompt;
         this.cwd = cwd;
         this.runtimeTools = runtimeTools;
         this.toolPermissions = toolPermissions;
@@ -74,6 +88,18 @@ public final class SessionContext {
 
     public String systemPrompt() {
         return systemPrompt;
+    }
+
+    public String agentInstructions() {
+        return agentInstructions;
+    }
+
+    public String environmentPrompt() {
+        return environmentPrompt;
+    }
+
+    public String memoryCatalogPrompt() {
+        return memoryCatalogPrompt;
     }
 
     public String cwd() {
@@ -140,6 +166,9 @@ public final class SessionContext {
                 model,
                 apiBackend(context, model),
                 systemPrompt(context),
+                agentInstructions(context),
+                Json.text(context, "append_system_prompt"),
+                Json.text(context, "memory_catalog_prompt"),
                 Json.text(context, "cwd"),
                 runtimeTools(context.get("runtime_tools")),
                 toolPermissions(context.get("runtime_tool_permissions")),
@@ -219,11 +248,16 @@ public final class SessionContext {
         return null;
     }
 
-    private static String systemPrompt(JsonNode context) {
+    private static String agentInstructions(JsonNode context) {
         String base = Json.text(context, "system_prompt");
         if (base == null || base.isBlank()) {
             base = Json.text(context, "custom_system_prompt");
         }
+        return base;
+    }
+
+    private static String systemPrompt(JsonNode context) {
+        String base = agentInstructions(context);
         String appended = Json.text(context, "append_system_prompt");
         if (appended == null || appended.isBlank()) {
             return base;

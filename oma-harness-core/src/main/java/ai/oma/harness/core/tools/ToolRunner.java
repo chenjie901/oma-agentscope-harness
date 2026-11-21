@@ -16,6 +16,8 @@ public final class ToolRunner {
     private static final Logger LOG = LoggerFactory.getLogger(ToolRunner.class);
     private static final Duration APPROVAL_TIMEOUT = Duration.ofMinutes(5);
     private static final Duration SANDBOX_TIMEOUT = Duration.ofMinutes(3);
+    private static final int TOOL_OUTPUT_THRESHOLD = 100_000;
+    private static final int TOOL_OUTPUT_PREVIEW = 1_000;
 
     private final AgentContext context;
     private final Supplier<SessionContext> sessions;
@@ -69,6 +71,9 @@ public final class ToolRunner {
                         ? "Tool call interrupted."
                         : "Remote tool outcome is unknown. Do not retry blindly; verify external state before repeating operations with side effects.");
             }
+            if (spec.kind() == ToolCatalog.Kind.MCP && !result.error()) {
+                result = persistIfLarge(result);
+            }
             LOG.debug("tool dispatch succeeded tool={} call={} error={} text_length={}",
                     spec.name(), callId, result.error(), result.text().length());
             if (changed == null) {
@@ -100,7 +105,37 @@ public final class ToolRunner {
             case WEB -> context.webTool(spec.remoteName(), input, context.threadId());
             case PORT -> context.portUrl(port(input), context.threadId());
             case QUESTION -> ToolResult.failure("Missing user question result");
+            case MCP -> context.mcpTool(spec.remoteName(), input, context.threadId());
         };
+    }
+
+    private ToolResult persistIfLarge(ToolResult result) {
+        String text = result.text();
+        int length = text.codePointCount(0, text.length());
+        if (length <= TOOL_OUTPUT_THRESHOLD) {
+            return result;
+        }
+        try {
+            String path = context.persistToolOutput(text, context.threadId());
+            String preview = preview(text);
+            String wrapped = "<persisted-output>Output too large (" + length
+                    + " characters). Full output saved to: " + path
+                    + "\nPreview (head and tail):\n" + preview + "\n</persisted-output>";
+            return ToolResult.text(wrapped);
+        } catch (RuntimeException e) {
+            LOG.warn("mcp output persistence failed: {}", e.getMessage());
+            return ToolResult.failure("remote call completed and was not retried: output could not be saved");
+        }
+    }
+
+    private static String preview(String text) {
+        int length = text.length();
+        if (length <= TOOL_OUTPUT_PREVIEW * 2) {
+            return text;
+        }
+        return text.substring(0, TOOL_OUTPUT_PREVIEW)
+                + "... [preview middle omitted] ..."
+                + text.substring(length - TOOL_OUTPUT_PREVIEW);
     }
 
     private static int port(JsonNode input) {

@@ -7,6 +7,7 @@ import ai.oma.harness.core.tools.ToolCatalog;
 import ai.oma.harness.core.tools.ToolCatalog.ToolSpec;
 import ai.oma.harness.core.tools.ToolResult;
 import ai.oma.harness.core.tools.ToolRunner;
+import ai.oma.harness.core.tools.mcp.McpToolBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.TextBlock;
@@ -40,7 +41,11 @@ public final class OmaToolkit {
     }
 
     public synchronized void sync(SessionContext context) {
-        List<ToolSpec> enabled = ToolCatalog.enabled(context);
+        sync(context, List.of());
+    }
+
+    public synchronized void sync(SessionContext context, List<McpToolBinding> mcpTools) {
+        List<ToolSpec> enabled = ToolCatalog.enabled(context, mcpTools);
         Map<String, ToolSpec> keep = new LinkedHashMap<>();
         for (ToolSpec spec : enabled) {
             keep.put(spec.name(), spec);
