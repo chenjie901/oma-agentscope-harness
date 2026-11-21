@@ -14,6 +14,9 @@ import java.util.UUID;
  * transcript 事件的静态方法供 core 持久化 assistant 回复。接入方通常不直接使用。
  */
 public final class Transcript {
+    public static final String COMPACTED_MARKER_OPEN = "<compacted-summary>";
+    public static final String COMPACTED_MARKER_CLOSE = "</compacted-summary>";
+
     private Transcript() {
     }
 
@@ -25,6 +28,15 @@ public final class Transcript {
         return message("assistant", uuid, text);
     }
 
+    /** 压缩摘要以标准 user 消息落盘，带标记包裹，确保后端 internal event 白名单接受并能跨重启恢复。 */
+    public static ObjectNode compacted(String uuid, String summary, int droppedMessages) {
+        String framed = COMPACTED_MARKER_OPEN + "\n" + (summary == null ? "" : summary)
+                + "\n" + COMPACTED_MARKER_CLOSE;
+        ObjectNode payload = message("user", uuid, framed);
+        payload.put("dropped_messages", droppedMessages);
+        return payload;
+    }
+
     public static String newUUID() {
         return "evt_" + UUID.randomUUID();
     }
@@ -32,20 +44,33 @@ public final class Transcript {
     public static List<RestoredMessage> parse(List<JsonNode> events) {
         List<RestoredMessage> messages = new ArrayList<>();
         for (JsonNode event : events) {
-            JsonNode payload = event.get("payload");
-            if (payload == null) {
-                continue;
-            }
+            JsonNode wrapper = event.get("payload");
+            JsonNode payload = wrapper != null ? wrapper : event;
             String type = Json.text(payload, "type");
             if (!"user".equals(type) && !"assistant".equals(type)) {
                 continue;
             }
             String text = textOf(payload.get("message"));
-            if (text != null && !text.isBlank()) {
-                messages.add(new RestoredMessage(type, text));
+            if (text == null || text.isBlank()) {
+                continue;
             }
+            if ("user".equals(type) && isCompacted(text)) {
+                messages.add(new RestoredMessage("user", unwrapCompacted(text), true));
+                continue;
+            }
+            messages.add(new RestoredMessage(type, text, false));
         }
         return messages;
+    }
+
+    private static boolean isCompacted(String text) {
+        return text.startsWith(COMPACTED_MARKER_OPEN) && text.contains(COMPACTED_MARKER_CLOSE);
+    }
+
+    private static String unwrapCompacted(String text) {
+        int from = COMPACTED_MARKER_OPEN.length();
+        int to = text.lastIndexOf(COMPACTED_MARKER_CLOSE);
+        return text.substring(from, to).strip();
     }
 
     private static ObjectNode message(String role, String uuid, String text) {
@@ -86,6 +111,9 @@ public final class Transcript {
         return builder.toString();
     }
 
-    public record RestoredMessage(String role, String text) {
+    public record RestoredMessage(String role, String text, boolean summary) {
+        public RestoredMessage(String role, String text) {
+            this(role, text, false);
+        }
     }
 }

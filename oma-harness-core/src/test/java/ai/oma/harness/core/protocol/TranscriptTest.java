@@ -63,6 +63,32 @@ class TranscriptTest {
         assertEquals("plain", Transcript.parse(events).get(0).text());
     }
 
+    @Test
+    void parsesBarePayloadWithoutWrapper() {
+        List<JsonNode> events = List.of(Json.parse("""
+                {"type":"user","uuid":"evt_1","message":{"role":"user","content":[{"type":"text","text":"bare"}]}}
+                """));
+
+        assertEquals(1, Transcript.parse(events).size());
+        assertEquals("bare", Transcript.parse(events).get(0).text());
+    }
+
+    @Test
+    void parsesCompactedSummaryAsSummaryMessage() {
+        List<JsonNode> events = List.of(
+                wrap(Transcript.user("evt_1", "first")),
+                wrap(Transcript.compacted("evt_2", "compressed summary", 7)));
+
+        List<Transcript.RestoredMessage> messages = Transcript.parse(events);
+
+        assertEquals(2, messages.size());
+        assertTrue(messages.get(1).summary());
+        assertEquals("compressed summary", messages.get(1).text());
+        JsonNode compactedPayload = Transcript.compacted("evt_2", "compressed summary", 7);
+        assertEquals("user", compactedPayload.get("type").asText());
+        assertEquals(7, compactedPayload.get("dropped_messages").asInt());
+    }
+
     private static JsonNode wrap(JsonNode payload) {
         var wrapper = Json.object();
         wrapper.set("payload", payload);

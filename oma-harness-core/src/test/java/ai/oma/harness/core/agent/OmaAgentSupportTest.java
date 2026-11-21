@@ -2,6 +2,7 @@ package ai.oma.harness.core.agent;
 
 import ai.oma.harness.core.OmaConfig;
 import ai.oma.harness.core.claim.SessionContext;
+import ai.oma.harness.core.compaction.CompactionConfig;
 import ai.oma.harness.core.json.Json;
 import ai.oma.harness.core.model.ModelReply;
 import ai.oma.harness.core.model.ModelRequest;
@@ -96,6 +97,70 @@ class OmaAgentSupportTest {
     }
 
     @Test
+    void publishEventEmitsStreamEventSequenceForText() {
+        FakeSupport support = new FakeSupport();
+        FakeContext context = new FakeContext();
+        support.start(context);
+
+        support.publishEvent(new TextBlockStartEvent("reply-1", "text"));
+        support.publishEvent(new TextBlockDeltaEvent("reply-1", "text", "hel"));
+        support.publishEvent(new TextBlockDeltaEvent("reply-1", "text", "lo"));
+        support.publishEvent(new TextBlockEndEvent("reply-1", "text"));
+
+        List<JsonNode> streams = context.nativePayloads.stream()
+                .filter(p -> "stream_event".equals(p.get("type").asText()))
+                .toList();
+        assertEquals(5, streams.size());
+        assertEquals("message_start", streams.get(0).get("event").get("type").asText());
+        assertEquals("reply-1", streams.get(0).get("event").get("message").get("id").asText());
+        assertEquals("content_block_start", streams.get(1).get("event").get("type").asText());
+        assertEquals("text", streams.get(1).get("event").get("content_block").get("type").asText());
+        assertEquals("content_block_delta", streams.get(2).get("event").get("type").asText());
+        assertEquals("hel", streams.get(2).get("event").get("delta").get("text").asText());
+        assertEquals("lo", streams.get(3).get("event").get("delta").get("text").asText());
+        assertEquals("content_block_stop", streams.get(4).get("event").get("type").asText());
+        streams.forEach(p -> assertTrue(p.has("uuid")));
+
+        CanonicalEvent.MessageCompleted message = context.emitted.stream()
+                .filter(e -> e instanceof CanonicalEvent.MessageCompleted)
+                .map(e -> (CanonicalEvent.MessageCompleted) e)
+                .findFirst()
+                .orElseThrow();
+        assertTrue(message.messageId().startsWith("sevt_"));
+        assertEquals("cse_1", streams.get(0).get("session_id").asText());
+    }
+
+    @Test
+    void streamEventFinalIdIsStableAcrossReplies() {
+        FakeSupport first = new FakeSupport();
+        FakeContext firstContext = new FakeContext();
+        first.start(firstContext);
+        first.publishEvent(new TextBlockStartEvent("reply-x", "text"));
+        first.publishEvent(new TextBlockDeltaEvent("reply-x", "text", "hi"));
+        first.publishEvent(new TextBlockEndEvent("reply-x", "text"));
+
+        FakeSupport second = new FakeSupport();
+        FakeContext secondContext = new FakeContext();
+        second.start(secondContext);
+        second.publishEvent(new TextBlockStartEvent("reply-x", "text"));
+        second.publishEvent(new TextBlockDeltaEvent("reply-x", "text", "different text"));
+        second.publishEvent(new TextBlockEndEvent("reply-x", "text"));
+
+        CanonicalEvent.MessageCompleted firstMessage = firstContext.emitted.stream()
+                .filter(e -> e instanceof CanonicalEvent.MessageCompleted)
+                .map(e -> (CanonicalEvent.MessageCompleted) e)
+                .findFirst()
+                .orElseThrow();
+        CanonicalEvent.MessageCompleted secondMessage = secondContext.emitted.stream()
+                .filter(e -> e instanceof CanonicalEvent.MessageCompleted)
+                .map(e -> (CanonicalEvent.MessageCompleted) e)
+                .findFirst()
+                .orElseThrow();
+        assertTrue(firstMessage.messageId().startsWith("sevt_"));
+        assertEquals(firstMessage.messageId(), secondMessage.messageId());
+    }
+
+    @Test
     void interruptDoesNotStartTurn() {
         FakeSupport support = new FakeSupport();
         FakeContext context = new FakeContext();
@@ -121,6 +186,50 @@ class OmaAgentSupportTest {
 
         assertTrue(context.eventKinds.isEmpty());
         assertTrue(context.persisted.isEmpty());
+    }
+
+    @Test
+    void compactionEmitsEventAndPersistsSummaryWhenHistoryExceedsThreshold() {
+        List<Transcript.RestoredMessage> history = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            history.add(new Transcript.RestoredMessage(i % 2 == 0 ? "user" : "assistant", "history-" + i));
+        }
+        CompactingSupport support = new CompactingSupport();
+        FakeContext context = new FakeContext("compressed summary", history);
+        support.start(context);
+
+        support.deliver(userEvent("e-compact", Json.parse(
+                "{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"go\"}]}}")));
+
+        assertTrue(context.eventKinds.contains("ContextCompacted"));
+        CanonicalEvent.ContextCompacted compacted = context.emitted.stream()
+                .filter(e -> e instanceof CanonicalEvent.ContextCompacted)
+                .map(e -> (CanonicalEvent.ContextCompacted) e)
+                .findFirst()
+                .orElseThrow();
+        assertEquals("compressed summary", compacted.summary());
+        assertTrue(compacted.droppedMessages() > 0);
+        assertTrue(context.persisted.stream().anyMatch(p ->
+                "user".equals(p.get("type").asText())
+                        && p.get("message").get("content").get(0).get("text").asText()
+                                .contains(Transcript.COMPACTED_MARKER_OPEN)));
+    }
+
+    @Test
+    void compactionFailureDegradesWithoutEmittingCompactedEvent() {
+        List<Transcript.RestoredMessage> history = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            history.add(new Transcript.RestoredMessage("user", "history-" + i));
+        }
+        CompactingSupport support = new CompactingSupport();
+        FakeContext context = new FakeContext(null, history);
+        support.start(context);
+
+        support.deliver(userEvent("e-compact-fail", Json.parse(
+                "{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"go\"}]}}")));
+
+        assertFalse(context.eventKinds.contains("ContextCompacted"));
+        assertTrue(context.eventKinds.contains("TurnCompleted"));
     }
 
     private static InboundEvent userEvent(String id, JsonNode payload) {
@@ -155,6 +264,42 @@ class OmaAgentSupportTest {
         }
     }
 
+    private static final class CompactingSupport extends OmaAgentSupport {
+        CompactingSupport() {
+            super(testConfig(), SessionContext.of("m", SessionContext.BACKEND_MESSAGES,
+                    "instructions", "/work", List.of(), java.util.Map.of()));
+        }
+
+        private static OmaConfig testConfig() {
+            return OmaConfig.builder()
+                    .endpoint("http://127.0.0.1:48080")
+                    .sessionId("cse_1")
+                    .ingressToken("tok")
+                    .workerEpoch(1)
+                    .build();
+        }
+
+        @Override
+        protected CompactionConfig compactionConfig() {
+            return CompactionConfig.builder()
+                    .triggerMessages(3)
+                    .keepMessages(1)
+                    .keepTokens(0)
+                    .prune(null)
+                    .build();
+        }
+
+        @Override
+        protected ReActAgent buildAgent(String systemPrompt) {
+            return ReActAgent.builder()
+                    .name("compacting-fake")
+                    .sysPrompt(systemPrompt)
+                    .model(new EmptyModel())
+                    .maxIters(1)
+                    .build();
+        }
+    }
+
     private static final class EmptyModel extends ChatModelBase {
         @Override
         protected Flux<ChatResponse> doStream(
@@ -171,7 +316,23 @@ class OmaAgentSupportTest {
     private static final class FakeContext implements AgentContext {
         private final List<String> eventKinds = new ArrayList<>();
         private final List<CanonicalEvent> emitted = new ArrayList<>();
+        private final List<JsonNode> nativePayloads = new ArrayList<>();
         private final List<ObjectNode> persisted = new ArrayList<>();
+        private final String chatSummary;
+        private final List<Transcript.RestoredMessage> restored;
+
+        FakeContext() {
+            this(null, List.of());
+        }
+
+        FakeContext(String chatSummary) {
+            this(chatSummary, List.of());
+        }
+
+        FakeContext(String chatSummary, List<Transcript.RestoredMessage> restored) {
+            this.chatSummary = chatSummary;
+            this.restored = restored;
+        }
 
         @Override
         public String sessionId() {
@@ -191,6 +352,7 @@ class OmaAgentSupportTest {
 
         @Override
         public void emitNative(JsonNode payload) {
+            nativePayloads.add(payload);
         }
 
         @Override
@@ -215,7 +377,11 @@ class OmaAgentSupportTest {
 
         @Override
         public ModelReply chat(ModelRequest request) {
-            return null;
+            if (chatSummary == null) {
+                throw new IllegalStateException("chat failed");
+            }
+            return new ModelReply("end_turn", List.of(java.util.Map.of("type", "text", "text", chatSummary)),
+                    0, 0, Json.object(), "req_compact");
         }
 
         @Override
@@ -230,7 +396,7 @@ class OmaAgentSupportTest {
 
         @Override
         public List<Transcript.RestoredMessage> restoredMessages() {
-            return List.of();
+            return restored;
         }
 
         @Override

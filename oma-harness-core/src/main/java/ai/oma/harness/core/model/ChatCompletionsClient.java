@@ -38,6 +38,11 @@ public final class ChatCompletionsClient {
     }
 
     public ModelReply send(ModelRequest request) {
+        return send(request, null);
+    }
+
+    /** 与 {@link #send(ModelRequest)} 相同，但在每个文本增量 SSE chunk 到达时回调 onTextDelta。 */
+    public ModelReply send(ModelRequest request, java.util.function.Consumer<String> onTextDelta) {
         LOG.debug("model request start backend=chat_completions model={} purpose={} messages={} tools={} thread={}",
                 request.model(), request.purpose(), request.messages().size(), request.tools().size(), config.threadId());
         HttpRequest httpRequest = HttpRequest.newBuilder(config.apiBase().resolve("v1/chat/completions"))
@@ -57,7 +62,7 @@ public final class ChatCompletionsClient {
                 throw new OmaHttpException(response.statusCode(), "model_request_failed", detail);
             }
             try (InputStream stream = response.body()) {
-                ModelReply reply = collect(stream, response.headers().firstValue("Request-Id").orElse(null));
+                ModelReply reply = collect(stream, response.headers().firstValue("Request-Id").orElse(null), onTextDelta);
                 LOG.debug("model response request_id={} stop={} text_length={} tool_uses={}",
                         reply.requestId(), reply.stopReason(), reply.text().length(), reply.toolUses().size());
                 return reply;
@@ -170,7 +175,7 @@ public final class ChatCompletionsClient {
         return entry;
     }
 
-    private ModelReply collect(InputStream stream, String requestId) throws IOException {
+    private ModelReply collect(InputStream stream, String requestId, java.util.function.Consumer<String> onTextDelta) throws IOException {
         StringBuilder answer = new StringBuilder();
         Map<Integer, ToolCallAccumulator> calls = new LinkedHashMap<>();
         String finishReason = null;
@@ -202,8 +207,11 @@ public final class ChatCompletionsClient {
                     continue;
                 }
                 String piece = Json.text(delta, "content");
-                if (piece != null) {
+                if (piece != null && !piece.isEmpty()) {
                     answer.append(piece);
+                    if (onTextDelta != null) {
+                        onTextDelta.accept(piece);
+                    }
                 }
                 for (JsonNode call : Json.elements(delta, "tool_calls")) {
                     int index = (int) Json.longValue(call, "index", calls.size());

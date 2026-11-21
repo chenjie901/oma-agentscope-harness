@@ -101,6 +101,14 @@ sequenceDiagram
 - 审批超时（5 分钟）按 `deny` 收尾并从等待表移除；中断时 `interruptApprovals` 让所有待审批调用立即以 `Tool call interrupted.` 结束。
 - 中断：`control_request.subtype=interrupt` 与顶层 `user.interrupt` 都按中断处理，必须在 SSE 读循环线程立即执行，不能排进轮次队列。
 
+### 流式响应
+
+前端逐 token 展示依赖 OMA 的 stream_event 预览协议，链路完整实现在 core：
+
+- 模型层：`ChatCompletionsClient.send` 在读 SSE 时对每个文本 chunk 回调；`OmaChatModel.doStream` 把每个 chunk 转成一个增量 `ChatResponse` 发出，工具调用块在流结束后统一发。
+- 事件层：`StreamEventPublisher` 把 AgentScope 的 `TextBlockStart/Delta/End`、`ThinkingBlockStart/End` 转成 `message_start` / `content_block_start` / `content_block_delta` / `content_block_stop` / `message_stop` 序列，以 ephemeral `stream_event` 上报；后端 `workerPreviewConverter` 转为 `event_start` + `event_delta(content_delta)` 推给前端。
+- 收敛：最终 `MessageCompleted` / `ThinkingDelta` 的 id 由 `StableAssistantEventID` 公式（`codeSessionId` + `messageID` + content block index + event type）计算，与预览 `event_id` 一致，前端据此把增量帧收敛到最终消息。
+
 ## 4. 工具下发与审批
 
 工具集合完全由 `session_context` 决定，harness 不再维护写死的工具列表：
@@ -178,12 +186,22 @@ flowchart TD
 - 顺序：先本地落盘，再上报远端。远端失败不影响本地，但会阻塞本轮确认直至重试耗尽。
 - 校验：本地与远端逐条比较 `uuid` 与 `payload`（对象键序无关的深比较）；只有互为前缀时才允许补齐或补传。
 
+### 上下文压缩
+
+长会话由 core 在每轮 `user.message` 推理前统一执行压缩检查（接入方仍只需实现 `buildAgent`），算法移植自 AgentScope harness 2.0.4 的 `ConversationCompactor`，但不依赖其 workspace / memory / offload 组件：
+
+- 触发：对话条数达到 `triggerMessages`（默认 50），或估算 token 达到动态阈值（`contextWindowSize - reserved`，模型未上报窗口时回退 160000）。
+- 处理：按 `keepMessages` / `keepTokens` 计算切分点并避开工具调用对；摘要前对超大工具结果和工具入参做轻量裁剪；把前缀经一次 `purpose=compaction` 的模型请求压成结构化摘要，与保留尾部一起写回 `AgentState.contextMutable()`。
+- 持久化：压缩只改变工作上下文，本地 transcript 仍保留全量原文；摘要以带 `<compacted-summary>` 标记的标准 `user` 消息落盘（附 `dropped_messages`），进程重启后识别标记恢复为摘要消息并参与后续累计压缩。用标准 `user` 类型是为了通过后端 internal event 白名单校验（仅接受 user/assistant/attachment/system/dsh_log），确保本地记录能正常补传到远端。
+- 事件：压缩成功后上报 `agent.thread_context_compacted`（`summary`、`dropped_messages`）；摘要请求失败或中断时记 warn 并跳过本轮压缩，不阻断回合。
+- 配置：默认开启，`OMA_HARNESS_COMPACTION_ENABLED=false`（系统属性或环境变量）可关闭；`OMA_HARNESS_COMPACTION_TRIGGER_MESSAGES=<n>` 可覆盖默认触发条数（默认 50）；接入方可覆写 `OmaAgentSupport.compactionConfig()` 调整阈值、尾部保留与摘要 prompt。
+
 ## 7. 与 oma-brain-dsh 的差异
 
 | 项 | dsh | Java harness |
 |---|---|---|
 | transcript 存储 | 原生动 JSONL（`dsh_log` session 事件 + 前缀校验 + 锁） | 本地 JSONL（`{seq,type,uuid,payload}`）+ 远端前缀校验，无跨进程锁 |
-| 压缩 | 有 compaction | 无，恢复只截取最近 40 条 |
+| 压缩 | 有 compaction | 已具备：回合边界按条数/估算 token 触发 LLM 摘要压缩，保留近期原文；复用 AgentScope 原生算法，摘要经 OMA 代理以 `purpose=compaction` 请求；压缩结果写回 agent state、以带标记的标准 user 消息落盘并上报 `agent.thread_context_compacted`。不做 memory flush / JSONL offload（本地 transcript 已全量保留原文），无溢出后自动重试 |
 | 工具来源 | `launch.tools` / `runtime_tools` | 同源，`ToolCatalog` 按 `runtime_tools` 注册 |
 | 审批 | 完整 `can_use_tool` 流程 | 同流程；`deny` 与未配置都走审批 |
 | 重启重试 | 无最大次数，409/410 置 `terminal` | 最多 10 次后置 `terminal` |

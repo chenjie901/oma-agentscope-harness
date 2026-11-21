@@ -4,7 +4,11 @@ import ai.oma.harness.core.OmaConfig;
 import ai.oma.harness.core.agentscope.OmaChatModel;
 import ai.oma.harness.core.agentscope.OmaToolkit;
 import ai.oma.harness.core.claim.SessionContext;
+import ai.oma.harness.core.compaction.CompactionConfig;
+import ai.oma.harness.core.compaction.CompactionResult;
+import ai.oma.harness.core.compaction.ConversationCompactor;
 import ai.oma.harness.core.json.Json;
+import ai.oma.harness.core.model.ModelRequest;
 import ai.oma.harness.core.protocol.CanonicalEvent;
 import ai.oma.harness.core.protocol.SystemPromptAssembler;
 import ai.oma.harness.core.protocol.Transcript;
@@ -16,6 +20,9 @@ import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.TextBlockEndEvent;
 import io.agentscope.core.event.TextBlockStartEvent;
+import io.agentscope.core.event.ThinkingBlockDeltaEvent;
+import io.agentscope.core.event.ThinkingBlockEndEvent;
+import io.agentscope.core.event.ThinkingBlockStartEvent;
 import io.agentscope.core.event.ToolCallDeltaEvent;
 import io.agentscope.core.event.ToolCallEndEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
@@ -28,11 +35,14 @@ import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.state.AgentState;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -83,12 +93,17 @@ public abstract class OmaAgentSupport implements HarnessAgent {
     /** 恢复历史消息时最多注入的条数，避免上下文过长；只取最近 N 条。 */
     protected static final int RESTORE_MESSAGE_LIMIT = 40;
 
+    /** 关闭压缩的系统属性/环境变量名；默认开启。 */
+    public static final String COMPACTION_ENABLED_KEY = "OMA_HARNESS_COMPACTION_ENABLED";
+
     protected final Logger log = LoggerFactory.getLogger(getClass());
     private final OmaConfig config;
     private final Set<String> emittedBlocks = new HashSet<>();
     private final Map<String, StringBuilder> textBlocks = new HashMap<>();
+    private final Map<String, StringBuilder> thinkingBlocks = new HashMap<>();
     private final Map<String, StringBuilder> toolCallInputs = new HashMap<>();
     private final Map<String, ToolResultAccumulator> toolResults = new HashMap<>();
+    private StreamEventPublisher streamPublisher;
     private volatile SessionContext session;
     private AgentContext context;
     private RuntimeContext runtimeContext;
@@ -124,6 +139,7 @@ public abstract class OmaAgentSupport implements HarnessAgent {
                 session.apiBackend());
         this.chatModel.onRequest(this::refreshPermissions);
         this.toolkit = new OmaToolkit(context, () -> session);
+        this.streamPublisher = new StreamEventPublisher(context, config.sessionId());
         context.refreshMcp(session, context.threadId());
         this.toolkit.sync(session, context.mcpTools());
         this.agent = buildAgent(assemblePrompt(session));
@@ -158,7 +174,8 @@ public abstract class OmaAgentSupport implements HarnessAgent {
     protected abstract ReActAgent buildAgent(String systemPrompt);
 
     /**
-     * 恢复历史消息（core 内部实现，接入方无需实现）。只注入最近 N 条，避免上下文超长。
+     * 恢复历史消息（core 内部实现，接入方无需实现）。只注入最近 N 条，避免上下文超长；
+     * 其中的压缩摘要记录恢复为带标记的 USER 消息，供后续压缩器识别与累计。
      */
     private void restoreMessages(List<Transcript.RestoredMessage> messages) {
         if (agent == null || messages == null || messages.isEmpty()) {
@@ -167,6 +184,14 @@ public abstract class OmaAgentSupport implements HarnessAgent {
         int start = Math.max(0, messages.size() - RESTORE_MESSAGE_LIMIT);
         AgentState state = agent.getAgentState(runtimeContext);
         for (Transcript.RestoredMessage message : messages.subList(start, messages.size())) {
+            if (message.summary()) {
+                state.contextMutable().add(Msg.builder()
+                        .name(ConversationCompactor.SUMMARY_MSG_NAME)
+                        .role(MsgRole.USER)
+                        .textContent(message.text())
+                        .build());
+                continue;
+            }
             MsgRole role = "assistant".equals(message.role()) ? MsgRole.ASSISTANT : MsgRole.USER;
             state.contextMutable().add(Msg.builder().role(role).textContent(message.text()).build());
         }
@@ -208,11 +233,15 @@ public abstract class OmaAgentSupport implements HarnessAgent {
         context.emit(new CanonicalEvent.TurnStarted(context.threadId()));
         context.emit(new CanonicalEvent.SessionRunning());
         try {
+            compactIfNeeded();
             Flux<AgentEvent> stream = streamTurn(text);
             if (stream != null) {
                 stream.doOnNext(this::publishEvent).blockLast();
             }
         } finally {
+            if (streamPublisher != null) {
+                streamPublisher.stopAll();
+            }
             context.emit(new CanonicalEvent.TurnCompleted(context.threadId(), "end_turn"));
             context.emit(new CanonicalEvent.SessionIdle());
             log.info("turn end event={} thread={}", event.eventId(), context.threadId());
@@ -225,6 +254,109 @@ public abstract class OmaAgentSupport implements HarnessAgent {
             return Flux.empty();
         }
         return agent.streamEvents(List.of(new UserMessage(text)), runtimeContext);
+    }
+
+    /**
+     * 上下文压缩编排（core 内部实现）。压缩失败或中断时降级为不压缩，不阻断当前回合；
+     * 成功时把摘要写回 agent state、持久化摘要记录并上报 ContextCompacted 事件。
+     */
+    private void compactIfNeeded() {
+        if (!compactionEnabled() || agent == null || context == null) {
+            return;
+        }
+        AgentState state = agent.getAgentState(runtimeContext);
+        List<Msg> allMessages = state.getContext();
+        List<Msg> systemMessages = systemMessages(allMessages);
+        List<Msg> conversation = withoutSystemMessages(allMessages);
+        if (conversation.isEmpty()) {
+            return;
+        }
+        ConversationCompactor compactor = new ConversationCompactor(this::summarize);
+        try {
+            Optional<CompactionResult> result = compactor
+                    .compactIfNeeded(conversation, compactionConfig(), chatModel.getContextWindowSize())
+                    .block();
+            if (result == null || result.isEmpty()) {
+                return;
+            }
+            CompactionResult compacted = result.get();
+            List<Msg> mutable = state.contextMutable();
+            mutable.clear();
+            mutable.addAll(systemMessages);
+            mutable.addAll(compacted.messages());
+            context.persistInternal(Transcript.compacted(
+                    Transcript.newUUID(), compacted.summary(), compacted.droppedMessages()));
+            context.emit(new CanonicalEvent.ContextCompacted(
+                    context.threadId(), compacted.summary(), compacted.droppedMessages()));
+            log.info("context compacted thread={} dropped={} remaining={}",
+                    context.threadId(), compacted.droppedMessages(), compacted.messages().size());
+        } catch (RuntimeException e) {
+            log.warn("context compaction failed, continuing without compaction: {}", e.getMessage());
+        }
+    }
+
+    private static List<Msg> systemMessages(List<Msg> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return List.of();
+        }
+        List<Msg> result = new ArrayList<>();
+        for (Msg message : messages) {
+            if (message.getRole() == MsgRole.SYSTEM) {
+                result.add(message);
+            }
+        }
+        return result;
+    }
+
+    private static List<Msg> withoutSystemMessages(List<Msg> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return List.of();
+        }
+        List<Msg> result = new ArrayList<>();
+        for (Msg message : messages) {
+            if (message.getRole() != MsgRole.SYSTEM) {
+                result.add(message);
+            }
+        }
+        return result;
+    }
+
+    /** 经 OMA 代理发起一次独立的 compaction 摘要请求，不触发权限刷新，也不污染主模型请求 id。 */
+    private Mono<String> summarize(List<Msg> prefix, String prompt) {
+        List<Map<String, Object>> messages = List.of(Map.of("role", "user", "content",
+                List.of(Map.of("type", "text", "text", prompt))));
+        ModelRequest request = new ModelRequest(
+                chatModel.getModelName(), null, messages, List.of(), 0, null, "compaction");
+        return Mono.fromCallable(() -> context.chat(request).text());
+    }
+
+    /** 压缩是否开启：默认开启，设置 {@link #COMPACTION_ENABLED_KEY} 为 false 关闭。 */
+    private static boolean compactionEnabled() {
+        String value = System.getProperty(COMPACTION_ENABLED_KEY);
+        if (value == null || value.isBlank()) {
+            value = System.getenv(COMPACTION_ENABLED_KEY);
+        }
+        return value == null || !"false".equalsIgnoreCase(value.strip());
+    }
+
+    /** 压缩配置钩子：接入方可覆写以调整触发阈值、保留策略与摘要 prompt；默认使用 SDK 默认值。 */
+    protected CompactionConfig compactionConfig() {
+        String override = System.getProperty("OMA_HARNESS_COMPACTION_TRIGGER_MESSAGES");
+        if (override == null || override.isBlank()) {
+            override = System.getenv("OMA_HARNESS_COMPACTION_TRIGGER_MESSAGES");
+        }
+        CompactionConfig.Builder builder = CompactionConfig.builder();
+        if (override != null && !override.isBlank()) {
+            try {
+                int trigger = Integer.parseInt(override.strip());
+                if (trigger > 0) {
+                    builder.triggerMessages(trigger);
+                }
+            } catch (NumberFormatException e) {
+                log.warn("invalid compaction trigger override: {}", override);
+            }
+        }
+        return builder.build();
     }
 
     /** 即时中断当前回合：必须带 runtimeContext，否则落到 AgentScope 的默认槽位而不生效。 */
@@ -255,21 +387,53 @@ public abstract class OmaAgentSupport implements HarnessAgent {
     }
 
     /**
-     * 把 AgentScope 的细粒度事件聚合映射为 OMA canonical 事件（core 内部实现）。
-     * 文本按 replyId+blockId 聚合，工具入参与工具结果按 toolCallId 聚合，在各自的
-     * End 事件时才真正发射，避免重复；同时做去重以保证 sevt_ 稳定 id。
+     * 把 AgentScope 的细粒度事件映射为 OMA 事件（core 内部实现）。
+     * 文本/思考块在 Delta 阶段实时上报 stream_event 供前端逐 token 渲染，在 End 阶段
+     * 发射最终 canonical 消息并用稳定 id 收敛预览帧；工具入参与工具结果按 toolCallId 聚合。
      */
     protected final void publishEvent(AgentEvent event) {
         if (event instanceof TextBlockStartEvent start) {
             textBlocks.putIfAbsent(textKey(start.getReplyId(), start.getBlockId()), new StringBuilder());
+            if (streamPublisher != null) {
+                streamPublisher.blockStart(start.getReplyId(), start.getBlockId(), false);
+            }
         } else if (event instanceof TextBlockDeltaEvent delta) {
             textBlocks
                     .computeIfAbsent(textKey(delta.getReplyId(), delta.getBlockId()), k -> new StringBuilder())
                     .append(delta.getDelta());
+            if (streamPublisher != null) {
+                streamPublisher.blockDelta(delta.getReplyId(), delta.getBlockId(), delta.getDelta());
+            }
         } else if (event instanceof TextBlockEndEvent end) {
-            StringBuilder text = textBlocks.remove(textKey(end.getReplyId(), end.getBlockId()));
+            String key = textKey(end.getReplyId(), end.getBlockId());
+            StringBuilder text = textBlocks.remove(key);
+            if (streamPublisher != null) {
+                streamPublisher.blockEnd(end.getReplyId(), end.getBlockId());
+            }
             if (text != null) {
-                publishText(textKey(end.getReplyId(), end.getBlockId()), text.toString());
+                String finalId = streamPublisher == null ? key
+                        : streamPublisher.finalEventId(end.getReplyId(), end.getBlockId(), false);
+                publishText(finalId, text.toString());
+            }
+        } else if (event instanceof ThinkingBlockStartEvent start) {
+            thinkingBlocks.putIfAbsent(textKey(start.getReplyId(), start.getBlockId()), new StringBuilder());
+            if (streamPublisher != null) {
+                streamPublisher.blockStart(start.getReplyId(), start.getBlockId(), true);
+            }
+        } else if (event instanceof ThinkingBlockDeltaEvent delta) {
+            thinkingBlocks
+                    .computeIfAbsent(textKey(delta.getReplyId(), delta.getBlockId()), k -> new StringBuilder())
+                    .append(delta.getDelta());
+        } else if (event instanceof ThinkingBlockEndEvent end) {
+            String key = textKey(end.getReplyId(), end.getBlockId());
+            StringBuilder text = thinkingBlocks.remove(key);
+            if (streamPublisher != null) {
+                streamPublisher.blockEnd(end.getReplyId(), end.getBlockId());
+            }
+            if (text != null) {
+                String finalId = streamPublisher == null ? key
+                        : streamPublisher.finalEventId(end.getReplyId(), end.getBlockId(), true);
+                publishThinking(finalId, text.toString());
             }
         } else if (event instanceof ToolCallStartEvent start) {
             toolCallInputs.putIfAbsent(start.getToolCallId(), new StringBuilder());
@@ -319,6 +483,18 @@ public abstract class OmaAgentSupport implements HarnessAgent {
         }
         context.persistInternal(Transcript.assistant(Transcript.newUUID(), text));
         context.emit(new CanonicalEvent.MessageCompleted(
+                context.threadId(), messageId, text, chatModel.lastRequestId()));
+    }
+
+    private void publishThinking(String messageId, String text) {
+        if (text == null || text.isBlank()) {
+            return;
+        }
+        String key = "thinking:" + messageId + ":" + text.hashCode();
+        if (!emittedBlocks.add(key)) {
+            return;
+        }
+        context.emit(new CanonicalEvent.ThinkingDelta(
                 context.threadId(), messageId, text, chatModel.lastRequestId()));
     }
 

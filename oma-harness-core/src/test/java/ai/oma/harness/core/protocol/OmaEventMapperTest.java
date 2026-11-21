@@ -74,4 +74,15 @@ class OmaEventMapperTest {
                 mapper.toOmaPayload(new CanonicalEvent.ToolCallStarted("root", "call_1", "Bash", Json.object()))
                         .get("id").asText()));
     }
+
+    @Test
+    void contextCompactedCarriesSummaryAndDroppedMessages() {
+        JsonNode payload = mapper.toOmaPayload(new CanonicalEvent.ContextCompacted(
+                "sthr_1", "compressed summary", 13));
+
+        assertEquals("agent.thread_context_compacted", payload.get("type").asText());
+        assertEquals("sthr_1", payload.get("thread_id").asText());
+        assertEquals("compressed summary", payload.get("summary").asText());
+        assertEquals(13, payload.get("dropped_messages").asInt());
+    }
 }

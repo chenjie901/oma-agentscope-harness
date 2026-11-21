@@ -112,7 +112,7 @@ public final class OmaEventMapper {
 
     public static boolean isEphemeral(JsonNode payload) {
         String type = payload == null ? null : Json.text(payload, "type");
-        return "event_start".equals(type) || "event_delta".equals(type);
+        return "event_start".equals(type) || "event_delta".equals(type) || "stream_event".equals(type);
     }
 
     private String toolUseEventId(String toolCallId, String threadId) {

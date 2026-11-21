@@ -47,24 +47,44 @@ public final class OmaModelClient {
     }
 
     public ModelReply send(ModelRequest request) {
+        return send(request, null);
+    }
+
+    /** 带文本增量回调的 send：仅 chat_completions 后端支持逐 chunk 回调，messages 后端一次性回调整段文本。 */
+    public ModelReply send(ModelRequest request, java.util.function.Consumer<String> onTextDelta) {
         String resolved = backend;
         if (BACKEND_CHAT_COMPLETIONS.equals(resolved)) {
-            return chatCompletions.send(request);
+            return chatCompletions.send(request, onTextDelta);
         }
         if (BACKEND_MESSAGES.equals(resolved)) {
-            return sendMessages(request);
+            return sendWithFallback(request, onTextDelta);
         }
+        return sendWithFallback(request, onTextDelta);
+    }
+
+    private ModelReply sendWithFallback(ModelRequest request, java.util.function.Consumer<String> onTextDelta) {
         try {
             ModelReply reply = sendMessages(request);
             backend = BACKEND_MESSAGES;
+            emitWholeText(reply, onTextDelta);
             return reply;
         } catch (OmaHttpException e) {
             if (!requiresChatCompletions(e)) {
                 throw e;
             }
-            ModelReply reply = chatCompletions.send(request);
+            ModelReply reply = chatCompletions.send(request, onTextDelta);
             backend = BACKEND_CHAT_COMPLETIONS;
             return reply;
+        }
+    }
+
+    private static void emitWholeText(ModelReply reply, java.util.function.Consumer<String> onTextDelta) {
+        if (onTextDelta == null || reply == null) {
+            return;
+        }
+        String text = reply.text();
+        if (text != null && !text.isEmpty()) {
+            onTextDelta.accept(text);
         }
     }
 

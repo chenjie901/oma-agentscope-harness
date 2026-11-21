@@ -69,33 +69,50 @@ public final class OmaChatModel extends ChatModelBase {
 
     @Override
     protected Flux<ChatResponse> doStream(List<Msg> messages, List<ToolSchema> tools, GenerateOptions options) {
-        try {
-            requestHook.run();
-            ModelReply reply = client.send(new ModelRequest(
-                    model,
-                    systemOf(messages),
-                    historyOf(messages),
-                    toolPayloads(tools),
-                    maxTokens(options),
-                    temperature(options),
-                    "main"));
-            lastRequestId = reply.requestId();
-            return Flux.just(response(reply));
-        } catch (RuntimeException e) {
-            return Flux.error(e);
-        }
+        ModelRequest request = new ModelRequest(
+                model,
+                systemOf(messages),
+                historyOf(messages),
+                toolPayloads(tools),
+                maxTokens(options),
+                temperature(options),
+                "main");
+        return Flux.create(sink -> {
+            try {
+                requestHook.run();
+                ModelReply reply = client.send(request, piece -> {
+                    if (piece != null && !piece.isEmpty()) {
+                        sink.next(textChunk(piece));
+                    }
+                });
+                lastRequestId = reply.requestId();
+                List<ContentBlock> toolBlocks = toolBlocks(reply);
+                if (!toolBlocks.isEmpty()) {
+                    sink.next(ChatResponse.builder()
+                            .id("oma_" + UUID.randomUUID())
+                            .content(toolBlocks)
+                            .usage(new ChatUsage((int) reply.inputTokens(), (int) reply.outputTokens(), 0.0))
+                            .finishReason(reply.stopReason())
+                            .build());
+                }
+                sink.complete();
+            } catch (RuntimeException e) {
+                sink.error(e);
+            }
+        });
     }
 
-    private ChatResponse response(ModelReply reply) {
+    private ChatResponse textChunk(String text) {
+        return ChatResponse.builder()
+                .id("oma_" + UUID.randomUUID())
+                .content(List.of(TextBlock.builder().text(text).build()))
+                .build();
+    }
+
+    private List<ContentBlock> toolBlocks(ModelReply reply) {
         List<ContentBlock> blocks = new ArrayList<>();
         for (Map<String, Object> block : reply.content()) {
-            String type = text(block.get("type"));
-            if ("text".equals(type)) {
-                String value = text(block.get("text"));
-                if (!value.isBlank()) {
-                    blocks.add(TextBlock.builder().text(value).build());
-                }
-            } else if ("tool_use".equals(type)) {
+            if ("tool_use".equals(text(block.get("type")))) {
                 Map<String, Object> input = inputOf(block.get("input"));
                 blocks.add(new ToolUseBlock(
                         text(block.get("id")),
@@ -105,12 +122,7 @@ public final class OmaChatModel extends ChatModelBase {
                         null));
             }
         }
-        return ChatResponse.builder()
-                .id("oma_" + UUID.randomUUID())
-                .content(blocks)
-                .usage(new ChatUsage((int) reply.inputTokens(), (int) reply.outputTokens(), 0.0))
-                .finishReason(reply.stopReason())
-                .build();
+        return blocks;
     }
 
     private String systemOf(List<Msg> messages) {

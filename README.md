@@ -230,3 +230,7 @@ mvn -B install -DskipTests
 ## 边界
 
 `oma-harness-core` 只负责协议：把 OMA 的事件送进 harness，把 harness 的动作送回 OMA。agent loop、prompt、工具策略由框架层决定，当前落在 AgentScope 的 `ReActAgent` 上；`ContextCompacted` 事件用于让 OMA 的 transcript 知道压缩发生过。
+
+长会话压缩由 core 在每轮推理前统一启用，接入方仍只需实现 `buildAgent`：达到条数或 token 阈值时把较早历史经一次 `purpose=compaction` 的模型请求压成摘要并保留近期原文，写回 agent state 的同时以带标记的标准 `user` 消息落盘、远端上报 `agent.thread_context_compacted`。算法移植自 AgentScope harness 2.0.4，不引入其 workspace/memory 依赖。默认开启；设置 `OMA_HARNESS_COMPACTION_ENABLED=false` 可关闭，设置 `OMA_HARNESS_COMPACTION_TRIGGER_MESSAGES=<n>` 可覆盖默认触发条数（默认 50），或覆写 `OmaAgentSupport.compactionConfig()` 调整阈值与摘要 prompt。
+
+响应流式输出同样由 core 统一处理：模型 SSE 的每个文本 chunk 即时转成 `stream_event` 预览上报，后端转换为 `event_start`/`event_delta` 推送给前端逐 token 展示，最终消息用稳定 id 收敛增量帧。接入方无需额外配置。
