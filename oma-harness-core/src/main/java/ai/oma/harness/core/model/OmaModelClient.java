@@ -47,22 +47,28 @@ public final class OmaModelClient {
     }
 
     public ModelReply send(ModelRequest request) {
-        return send(request, null);
+        return send(request, null, null);
     }
 
-    /** 带文本增量回调的 send：仅 chat_completions 后端支持逐 chunk 回调，messages 后端一次性回调整段文本。 */
     public ModelReply send(ModelRequest request, java.util.function.Consumer<String> onTextDelta) {
+        return send(request, onTextDelta, null);
+    }
+
+    /** 带文本/推理增量回调的 send：仅 chat_completions 后端支持逐 chunk 回调，messages 后端一次性回调整段文本。 */
+    public ModelReply send(ModelRequest request, java.util.function.Consumer<String> onTextDelta,
+                           java.util.function.Consumer<String> onReasoningDelta) {
         String resolved = backend;
         if (BACKEND_CHAT_COMPLETIONS.equals(resolved)) {
-            return chatCompletions.send(request, onTextDelta);
+            return chatCompletions.send(request, onTextDelta, onReasoningDelta);
         }
         if (BACKEND_MESSAGES.equals(resolved)) {
-            return sendWithFallback(request, onTextDelta);
+            return sendWithFallback(request, onTextDelta, onReasoningDelta);
         }
-        return sendWithFallback(request, onTextDelta);
+        return sendWithFallback(request, onTextDelta, onReasoningDelta);
     }
 
-    private ModelReply sendWithFallback(ModelRequest request, java.util.function.Consumer<String> onTextDelta) {
+    private ModelReply sendWithFallback(ModelRequest request, java.util.function.Consumer<String> onTextDelta,
+                                        java.util.function.Consumer<String> onReasoningDelta) {
         try {
             ModelReply reply = sendMessages(request);
             backend = BACKEND_MESSAGES;
@@ -72,7 +78,7 @@ public final class OmaModelClient {
             if (!requiresChatCompletions(e)) {
                 throw e;
             }
-            ModelReply reply = chatCompletions.send(request, onTextDelta);
+            ModelReply reply = chatCompletions.send(request, onTextDelta, onReasoningDelta);
             backend = BACKEND_CHAT_COMPLETIONS;
             return reply;
         }

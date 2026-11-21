@@ -23,6 +23,8 @@ public final class ControlPlane {
 
     private final Sink sink;
     private final Map<String, CompletableFuture<Decision>> approvals = new ConcurrentHashMap<>();
+    private final Map<String, String> approvalTools = new ConcurrentHashMap<>();
+    private final Map<String, String> approvalThreads = new ConcurrentHashMap<>();
     private volatile WorkerMetadata metadata;
 
     public ControlPlane(Sink sink, WorkerMetadata metadata) {
@@ -75,6 +77,8 @@ public final class ControlPlane {
         String requestId = UUID.randomUUID().toString();
         CompletableFuture<Decision> future = new CompletableFuture<>();
         approvals.put(requestId, future);
+        approvalTools.put(requestId, toolName == null ? "tool" : toolName);
+        approvalThreads.put(requestId, threadId);
 
         ObjectNode request = Json.object();
         request.put("subtype", "can_use_tool");
@@ -95,19 +99,39 @@ public final class ControlPlane {
         payload.put("request_id", requestId);
         payload.set("request", request);
 
+        ObjectNode details = Json.object();
+        details.put("tool_name", toolName == null ? "" : toolName);
+        if (toolUseId != null && !toolUseId.isBlank()) {
+            details.put("tool_use_id", toolUseId);
+        }
+        if (threadId != null && !threadId.isBlank() && !"root".equals(threadId)) {
+            details.put("session_thread_id", threadId);
+        }
+
         try {
             sink.emitControl(payload);
+            sink.publishWorkerStatus("requires_action", details);
             LOG.info("approval requested id={} tool={} thread={}",
                     requestId, toolName, threadId);
         } catch (RuntimeException e) {
             approvals.remove(requestId);
+            approvalTools.remove(requestId);
+            approvalThreads.remove(requestId);
             future.complete(Decision.deny("Approval request could not be delivered"));
+            sink.publishWorkerStatus("running", null);
             return future;
         }
 
         return future.orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS)
                 .exceptionally(error -> Decision.deny("Approval timed out"))
-                .whenComplete((decision, error) -> approvals.remove(requestId));
+                .whenComplete((decision, error) -> {
+                    approvals.remove(requestId);
+                    approvalTools.remove(requestId);
+                    approvalThreads.remove(requestId);
+                    if (approvals.isEmpty()) {
+                        sink.publishWorkerStatus("running", null);
+                    }
+                });
     }
 
     public Decision await(CompletableFuture<Decision> future) {
@@ -124,6 +148,8 @@ public final class ControlPlane {
     public void interruptApprovals(String message) {
         approvals.forEach((requestId, future) -> {
             if (approvals.remove(requestId, future)) {
+                approvalTools.remove(requestId);
+                approvalThreads.remove(requestId);
                 future.complete(Decision.deny(message));
             }
         });
@@ -185,6 +211,8 @@ public final class ControlPlane {
             return;
         }
         if (!"success".equals(Json.text(response, "subtype"))) {
+            sink.emitSystemMessage("Approval response failed for "
+                    + approvalTools.getOrDefault(requestId, "tool"), approvalThreads.get(requestId));
             future.complete(Decision.deny("Approval response failed"));
             return;
         }
@@ -203,7 +231,15 @@ public final class ControlPlane {
         if (message == null) {
             message = Json.text(decision, "denyMessage");
         }
-        future.complete(new Decision(allowed, Json.nullable(decision, "updatedInput"), message,
+        String tool = approvalTools.getOrDefault(requestId, "tool");
+        String thread = approvalThreads.get(requestId);
+        JsonNode updatedInput = Json.nullable(decision, "updatedInput");
+        if (allowed && updatedInput != null) {
+            sink.emitSystemMessage("Approved " + tool + " arguments: " + Json.write(updatedInput), thread);
+        } else if (!allowed && message != null && !message.isBlank()) {
+            sink.emitSystemMessage("Denied " + tool + ": " + message, thread);
+        }
+        future.complete(new Decision(allowed, updatedInput, message,
                 Json.nullable(decision, "externalResult")));
     }
 
@@ -213,6 +249,12 @@ public final class ControlPlane {
         void saveMetadata(WorkerMetadata metadata);
 
         void applyModel(String model);
+
+        default void publishWorkerStatus(String status, JsonNode details) {
+        }
+
+        default void emitSystemMessage(String text, String threadId) {
+        }
     }
 
     public record Decision(boolean allowed, JsonNode updatedInput, String message, JsonNode externalResult) {

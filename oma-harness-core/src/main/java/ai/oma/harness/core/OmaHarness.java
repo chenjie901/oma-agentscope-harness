@@ -324,6 +324,7 @@ public final class OmaHarness implements AutoCloseable {
         } catch (Exception e) {
             LOG.warn("harness failed to handle event " + event.eventId(), e);
             diagnostics.event("oma_runtime_event", "OmaHarness.deliver");
+            emitTurnFailure(startedAt);
             InternalEventStore store = internalEvents;
             if (store != null && store.isTerminal()) {
                 close();
@@ -376,6 +377,17 @@ public final class OmaHarness implements AutoCloseable {
         long durationMs = Math.max(0, (System.nanoTime() - startedAt) / 1_000_000L);
         JsonNode payload = mapper.turnResultPayload("success", false, durationMs);
         LOG.debug("turn result emit duration_ms={} thread={}", durationMs, threadId);
+        emitResult(payload);
+    }
+
+    private void emitTurnFailure(long startedAt) {
+        long durationMs = Math.max(0, (System.nanoTime() - startedAt) / 1_000_000L);
+        JsonNode payload = mapper.turnResultPayload("error_max_turns", true, durationMs);
+        LOG.debug("turn failure emit duration_ms={} thread={}", durationMs, threadId);
+        emitResult(payload);
+    }
+
+    private void emitResult(JsonNode payload) {
         try {
             transport.emit(epoch, List.of(new WorkerTransport.OutboundEvent(payload, false)));
         } catch (OmaHttpException e) {
@@ -671,6 +683,35 @@ public final class OmaHarness implements AutoCloseable {
         @Override
         public void applyModel(String model) {
             agent.applyModel(model);
+        }
+
+        @Override
+        public void publishWorkerStatus(String status, JsonNode details) {
+            try {
+                transport.setWorkerStatus(epoch, status, null, details);
+            } catch (OmaHttpException e) {
+                LOG.warn("worker status update rejected: {}", e.getMessage());
+            }
+        }
+
+        @Override
+        public void emitSystemMessage(String text, String thread) {
+            if (text == null || text.isBlank()) {
+                return;
+            }
+            ObjectNode payload = Json.object();
+            payload.put("type", "system");
+            payload.put("uuid", "evt_" + java.util.UUID.randomUUID());
+            if (thread != null && !thread.isBlank() && !"root".equals(thread)) {
+                payload.put("session_thread_id", thread);
+            }
+            com.fasterxml.jackson.databind.node.ArrayNode content = payload.putArray("content");
+            content.addObject().put("type", "text").put("text", text);
+            try {
+                transport.emit(epoch, List.of(new WorkerTransport.OutboundEvent(payload, false)));
+            } catch (OmaHttpException e) {
+                LOG.warn("system message rejected: {}", e.getMessage());
+            }
         }
     }
 

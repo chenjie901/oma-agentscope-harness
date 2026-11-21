@@ -153,10 +153,72 @@ class ControlPlaneTest {
                 """)));
     }
 
+    @Test
+    void publishesRequiresActionWhileAwaitingApprovalThenRestoresRunning() {
+        Recorder recorder = new Recorder();
+        ControlPlane plane = new ControlPlane(recorder, WorkerMetadata.empty());
+
+        CompletableFuture<ControlPlane.Decision> pending = plane.requestApproval(
+                "Bash", "tool-5", Json.parse("{\"command\":\"ls\"}"), "root", Duration.ofSeconds(5));
+
+        assertEquals(1, recorder.statuses.size());
+        assertEquals("requires_action", recorder.statuses.get(0).status());
+        assertEquals("Bash", recorder.statuses.get(0).details().get("tool_name").asText());
+
+        plane.handle(Json.parse("""
+                {"type":"control_response","response":{"subtype":"success","request_id":"ignored",
+                 "response":{"behavior":"allow"}}}
+                """));
+        plane.interruptApprovals("stop");
+        plane.await(pending);
+
+        assertEquals("running", recorder.statuses.get(recorder.statuses.size() - 1).status());
+    }
+
+    @Test
+    void emitsSystemMessageOnApprovedUpdatedInput() {
+        Recorder recorder = new Recorder();
+        ControlPlane plane = new ControlPlane(recorder, WorkerMetadata.empty());
+
+        CompletableFuture<ControlPlane.Decision> pending = plane.requestApproval(
+                "Bash", "tool-6", Json.parse("{\"command\":\"ls\"}"), "child-2", Duration.ofSeconds(5));
+        String requestId = recorder.controls.get(0).get("request_id").asText();
+        plane.handle(Json.parse("""
+                {"type":"control_response","response":{"subtype":"success","request_id":"%s",
+                 "response":{"behavior":"allow","updatedInput":{"command":"ls -la"}}}}
+                """.formatted(requestId)));
+
+        plane.await(pending);
+        assertEquals(1, recorder.systemMessages.size());
+        assertTrue(recorder.systemMessages.get(0).text().contains("Approved Bash arguments"));
+        assertEquals("child-2", recorder.systemMessages.get(0).thread());
+    }
+
+    @Test
+    void emitsSystemMessageOnDenial() {
+        Recorder recorder = new Recorder();
+        ControlPlane plane = new ControlPlane(recorder, WorkerMetadata.empty());
+
+        CompletableFuture<ControlPlane.Decision> pending = plane.requestApproval(
+                "Bash", "tool-7", null, "root", Duration.ofSeconds(5));
+        String requestId = recorder.controls.get(0).get("request_id").asText();
+        plane.handle(Json.parse("""
+                {"type":"control_response","response":{"subtype":"success","request_id":"%s",
+                 "response":{"behavior":"deny","denyMessage":"not allowed"}}}
+                """.formatted(requestId)));
+
+        ControlPlane.Decision decision = plane.await(pending);
+        assertFalse(decision.allowed());
+        assertEquals(1, recorder.systemMessages.size());
+        assertTrue(recorder.systemMessages.get(0).text().contains("Denied Bash"));
+    }
+
     private static final class Recorder implements ControlPlane.Sink {
         private final List<JsonNode> controls = new ArrayList<>();
         private final List<WorkerMetadata> saved = new ArrayList<>();
         private final List<String> models = new ArrayList<>();
+        private final List<StatusRecord> statuses = new ArrayList<>();
+        private final List<SystemMessage> systemMessages = new ArrayList<>();
 
         @Override
         public void emitControl(JsonNode payload) {
@@ -171,6 +233,22 @@ class ControlPlaneTest {
         @Override
         public void applyModel(String model) {
             models.add(model);
+        }
+
+        @Override
+        public void publishWorkerStatus(String status, JsonNode details) {
+            statuses.add(new StatusRecord(status, details));
+        }
+
+        @Override
+        public void emitSystemMessage(String text, String thread) {
+            systemMessages.add(new SystemMessage(text, thread));
+        }
+
+        private record StatusRecord(String status, JsonNode details) {
+        }
+
+        private record SystemMessage(String text, String thread) {
         }
     }
 }

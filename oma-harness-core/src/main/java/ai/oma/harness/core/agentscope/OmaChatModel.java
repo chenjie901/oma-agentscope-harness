@@ -9,6 +9,7 @@ import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.ThinkingBlock;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.model.ChatModelBase;
@@ -80,17 +81,23 @@ public final class OmaChatModel extends ChatModelBase {
         return Flux.create(sink -> {
             try {
                 requestHook.run();
-                ModelReply reply = client.send(request, piece -> {
-                    if (piece != null && !piece.isEmpty()) {
-                        sink.next(textChunk(piece));
-                    }
-                });
+                ModelReply reply = client.send(request,
+                        piece -> {
+                            if (piece != null && !piece.isEmpty()) {
+                                sink.next(textChunk(piece));
+                            }
+                        },
+                        reasoning -> {
+                            if (reasoning != null && !reasoning.isEmpty()) {
+                                sink.next(thinkingChunk(reasoning));
+                            }
+                        });
                 lastRequestId = reply.requestId();
-                List<ContentBlock> toolBlocks = toolBlocks(reply);
-                if (!toolBlocks.isEmpty()) {
+                List<ContentBlock> finalBlocks = finalBlocks(reply);
+                if (!finalBlocks.isEmpty()) {
                     sink.next(ChatResponse.builder()
                             .id("oma_" + UUID.randomUUID())
-                            .content(toolBlocks)
+                            .content(finalBlocks)
                             .usage(new ChatUsage((int) reply.inputTokens(), (int) reply.outputTokens(), 0.0))
                             .finishReason(reply.stopReason())
                             .build());
@@ -109,10 +116,18 @@ public final class OmaChatModel extends ChatModelBase {
                 .build();
     }
 
-    private List<ContentBlock> toolBlocks(ModelReply reply) {
+    private ChatResponse thinkingChunk(String reasoning) {
+        return ChatResponse.builder()
+                .id("oma_" + UUID.randomUUID())
+                .content(List.of(ThinkingBlock.builder().thinking(reasoning).build()))
+                .build();
+    }
+
+    private List<ContentBlock> finalBlocks(ModelReply reply) {
         List<ContentBlock> blocks = new ArrayList<>();
         for (Map<String, Object> block : reply.content()) {
-            if ("tool_use".equals(text(block.get("type")))) {
+            String type = text(block.get("type"));
+            if ("tool_use".equals(type)) {
                 Map<String, Object> input = inputOf(block.get("input"));
                 blocks.add(new ToolUseBlock(
                         text(block.get("id")),
@@ -120,6 +135,13 @@ public final class OmaChatModel extends ChatModelBase {
                         input,
                         Json.write(Json.mapper().valueToTree(input)),
                         null));
+            } else if ("thinking".equals(type)) {
+                String value = text(block.get("thinking"));
+                if (value != null && !value.isBlank()) {
+                    blocks.add(ThinkingBlock.builder().thinking(value).build());
+                }
+            } else if ("redacted_thinking".equals(type)) {
+                blocks.add(ThinkingBlock.builder().thinking("[redacted thinking]").build());
             }
         }
         return blocks;

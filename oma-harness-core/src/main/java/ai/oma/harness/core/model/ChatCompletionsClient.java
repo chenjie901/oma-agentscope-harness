@@ -38,11 +38,16 @@ public final class ChatCompletionsClient {
     }
 
     public ModelReply send(ModelRequest request) {
-        return send(request, null);
+        return send(request, null, null);
     }
 
-    /** 与 {@link #send(ModelRequest)} 相同，但在每个文本增量 SSE chunk 到达时回调 onTextDelta。 */
     public ModelReply send(ModelRequest request, java.util.function.Consumer<String> onTextDelta) {
+        return send(request, onTextDelta, null);
+    }
+
+    /** 与 {@link #send(ModelRequest)} 相同，但在文本/推理增量 SSE chunk 到达时分别回调。 */
+    public ModelReply send(ModelRequest request, java.util.function.Consumer<String> onTextDelta,
+                           java.util.function.Consumer<String> onReasoningDelta) {
         LOG.debug("model request start backend=chat_completions model={} purpose={} messages={} tools={} thread={}",
                 request.model(), request.purpose(), request.messages().size(), request.tools().size(), config.threadId());
         HttpRequest httpRequest = HttpRequest.newBuilder(config.apiBase().resolve("v1/chat/completions"))
@@ -62,7 +67,8 @@ public final class ChatCompletionsClient {
                 throw new OmaHttpException(response.statusCode(), "model_request_failed", detail);
             }
             try (InputStream stream = response.body()) {
-                ModelReply reply = collect(stream, response.headers().firstValue("Request-Id").orElse(null), onTextDelta);
+                ModelReply reply = collect(stream, response.headers().firstValue("Request-Id").orElse(null),
+                        onTextDelta, onReasoningDelta);
                 LOG.debug("model response request_id={} stop={} text_length={} tool_uses={}",
                         reply.requestId(), reply.stopReason(), reply.text().length(), reply.toolUses().size());
                 return reply;
@@ -175,7 +181,9 @@ public final class ChatCompletionsClient {
         return entry;
     }
 
-    private ModelReply collect(InputStream stream, String requestId, java.util.function.Consumer<String> onTextDelta) throws IOException {
+    private ModelReply collect(InputStream stream, String requestId,
+                               java.util.function.Consumer<String> onTextDelta,
+                               java.util.function.Consumer<String> onReasoningDelta) throws IOException {
         StringBuilder answer = new StringBuilder();
         Map<Integer, ToolCallAccumulator> calls = new LinkedHashMap<>();
         String finishReason = null;
@@ -211,6 +219,15 @@ public final class ChatCompletionsClient {
                     answer.append(piece);
                     if (onTextDelta != null) {
                         onTextDelta.accept(piece);
+                    }
+                }
+                if (onReasoningDelta != null) {
+                    String reasoning = Json.text(delta, "reasoning_content");
+                    if (reasoning == null) {
+                        reasoning = Json.text(delta, "reasoning");
+                    }
+                    if (reasoning != null && !reasoning.isEmpty()) {
+                        onReasoningDelta.accept(reasoning);
                     }
                 }
                 for (JsonNode call : Json.elements(delta, "tool_calls")) {

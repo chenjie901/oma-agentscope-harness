@@ -98,15 +98,18 @@ sequenceDiagram
 `SessionContext` 分别暴露 `agentInstructions()` / `environmentPrompt()` / `memoryCatalogPrompt()` / `cwd()` / `subagents()`；原 `systemPrompt()` 保留为拼接兼容字段，不再作为最终 prompt。单测 `SystemPromptAssemblerTest` 锁定层顺序、subagents 开关与空层跳过。
 - `set_model`：先 `PUT /worker` 落 `external_metadata.model`，成功后再切换 `OmaChatModel`，最后回 `success`。任何一步失败都回 `error`，避免服务端与 harness 模型状态分叉。
 - 上行审批：`control_request` 只发 `subtype=can_use_tool`，携带 `tool_name`、`tool_use_id` 与原始 `input`；`control_response` 解析 `behavior`、`updatedInput`、`message`/`denyMessage`、`externalResult`。
+- 审批状态：发出审批请求时 `PUT /worker` 报 `worker_status=requires_action` 并带 `requires_action_details`（tool_name/tool_use_id/session_thread_id）；审批结束（回答、超时、中断）且无其它待审批时恢复 `running`。
+- 审批说明：允许且带 `updatedInput` 时发 `system.message`（`Approved <tool> arguments: ...`），拒绝或响应失败时发拒绝说明，供前端展示审批变更。
 - 审批超时（5 分钟）按 `deny` 收尾并从等待表移除；中断时 `interruptApprovals` 让所有待审批调用立即以 `Tool call interrupted.` 结束。
 - 中断：`control_request.subtype=interrupt` 与顶层 `user.interrupt` 都按中断处理，必须在 SSE 读循环线程立即执行，不能排进轮次队列。
+- 回合失败：`agent.deliver` 抛异常时上报 `result{is_error:true, subtype:error_max_turns}`，后端据此生成 `session.error` 与 `stop_reason=retries_exhausted` 的 idle；成功时仍发 `subtype=success`。
 
 ### 流式响应
 
 前端逐 token 展示依赖 OMA 的 stream_event 预览协议，链路完整实现在 core：
 
-- 模型层：`ChatCompletionsClient.send` 在读 SSE 时对每个文本 chunk 回调；`OmaChatModel.doStream` 把每个 chunk 转成一个增量 `ChatResponse` 发出，工具调用块在流结束后统一发。
-- 事件层：`StreamEventPublisher` 把 AgentScope 的 `TextBlockStart/Delta/End`、`ThinkingBlockStart/End` 转成 `message_start` / `content_block_start` / `content_block_delta` / `content_block_stop` / `message_stop` 序列，以 ephemeral `stream_event` 上报；后端 `workerPreviewConverter` 转为 `event_start` + `event_delta(content_delta)` 推给前端。
+- 模型层：`ChatCompletionsClient.send` 在读 SSE 时对文本与推理（`reasoning_content`/`reasoning`）chunk 分别回调；`OmaChatModel.doStream` 把文本 chunk 转成 `TextBlock`、推理 chunk 转成 `ThinkingBlock` 即时发出，`thinking`/`redacted_thinking` 内容块与工具调用块在流结束后统一发。
+- 事件层：`StreamEventPublisher` 把 AgentScope 的 `TextBlockStart/Delta/End`、`ThinkingBlockStart/End` 转成 `message_start` / `content_block_start` / `content_block_delta` / `content_block_stop` / `message_stop` 序列，以 ephemeral `stream_event` 上报；后端 `workerPreviewConverter` 转为 `event_start` + `event_delta(content_delta)` 推给前端。thinking 正文的增量被后端主动丢弃（DSH 同样），前端只显示占位思考块。
 - 收敛：最终 `MessageCompleted` / `ThinkingDelta` 的 id 由 `StableAssistantEventID` 公式（`codeSessionId` + `messageID` + content block index + event type）计算，与预览 `event_id` 一致，前端据此把增量帧收敛到最终消息。
 
 ## 4. 工具下发与审批
