@@ -16,6 +16,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
+/** 服务端下发的一个 MCP server 配置（名称、前缀、类型、URL 等），用于建立外部 MCP 连接。 */
 public record McpServerConfig(String name, String prefix, String type, URI url,
                               Map<String, String> headers, Set<String> disabledTools) {
 

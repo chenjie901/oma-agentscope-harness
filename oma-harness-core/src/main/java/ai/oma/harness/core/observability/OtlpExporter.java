@@ -1,6 +1,5 @@
 package ai.oma.harness.core.observability;
 
-import ai.oma.harness.core.json.Json;
 import ai.oma.harness.core.transport.WorkerTransport;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
@@ -10,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Set;
 import java.util.function.LongSupplier;
 
+/** OTLP trace 导出器：把 worker 的 span 按配置上报到 OTLP endpoint，未配置时为 no-op。core 内部使用。 */
 public final class OtlpExporter {
     private static final Logger LOG = LoggerFactory.getLogger(OtlpExporter.class);
     private static final Set<String> KINDS = Set.of("logs", "traces");

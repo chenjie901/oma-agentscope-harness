@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/** 用户提问工具：当 agent 需要向用户提问时，通过服务端发出问题并等待回答。由 OmaToolkit 注册为工具。 */
 public final class UserQuestions {
     public record Question(String id, List<String> labels, boolean multiSelect) {
     }

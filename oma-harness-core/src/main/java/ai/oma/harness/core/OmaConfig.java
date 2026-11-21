@@ -3,6 +3,22 @@ package ai.oma.harness.core;
 import java.net.URI;
 import java.time.Duration;
 
+/**
+ * 单个 worker 会话的运行配置。由 claim 返回的凭据构造，接入方一般不直接构建；
+ * 构造时会校验必填字段并给可选超时参数设置默认值。
+ *
+ * @param endpoint           OMA 服务端地址
+ * @param sessionId          code session id（形如 cse_...）
+ * @param ingressToken       事件上行与 worker 接口的鉴权 token
+ * @param modelToken         模型代理 token；为空时回退到 ingressToken
+ * @param workerEpoch        claim 返回的 worker 代次，用于租约与幂等
+ * @param threadId           根线程 id，默认 root
+ * @param heartbeatInterval  心跳间隔，默认 10s
+ * @param streamIdleTimeout  事件流空闲超时，默认 45s
+ * @param reconnectBudget    重连总预算，默认 10min
+ * @param maxReconnectBackoff 单次最大重连退避，默认 30s
+ * @param requestTimeout     HTTP 请求超时，默认 35s
+ */
 public record OmaConfig(
         URI endpoint,
         String sessionId,

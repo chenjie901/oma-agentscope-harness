@@ -52,6 +52,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * 单个会话的运行时：实现 AgentContext，把 agent 产生的 canonical 事件转换为 OMA wire 事件上报，
+ * 并管理 transcript、内部事件、附件、控制面与运行时工具刷新。由 OmaWorker 创建并注入 agent，
+ * 接入方无需直接接触。
+ */
 public final class OmaHarness implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(OmaHarness.class);
     private static final int INTERNAL_EVENT_BATCH = 50;

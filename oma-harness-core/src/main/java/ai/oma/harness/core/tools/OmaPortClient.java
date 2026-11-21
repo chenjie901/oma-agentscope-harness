@@ -9,6 +9,7 @@ import java.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/** OMA port 工具客户端：向服务端请求暴露/查询端口能力，供 OmaToolkit 注册为工具。core 内部使用。 */
 public final class OmaPortClient {
     private static final Logger LOG = LoggerFactory.getLogger(OmaPortClient.class);
     private static final Duration TIMEOUT = Duration.ofSeconds(10);

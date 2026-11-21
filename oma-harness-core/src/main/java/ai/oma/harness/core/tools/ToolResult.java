@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+/** 一次工具执行的结果：是否失败、错误码、内容块（文本等）与原始响应。 */
 public record ToolResult(boolean error, String errorCode, List<Map<String, Object>> content, JsonNode raw) {
 
     public static ToolResult text(String text) {

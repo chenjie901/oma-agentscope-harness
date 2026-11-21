@@ -9,6 +9,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+/**
+ * 工具目录：维护当前会话可用的工具列表（含 MCP 工具），按权限过滤后提供给 OmaToolkit 注册。
+ * 由 core 在会话启动与权限刷新时更新，接入方无需直接操作。
+ */
 public final class ToolCatalog {
     public static final String PERMISSION_ALLOW = "allow";
     public static final String PERMISSION_ASK = "ask";

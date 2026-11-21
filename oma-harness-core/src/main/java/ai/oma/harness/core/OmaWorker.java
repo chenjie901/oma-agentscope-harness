@@ -20,6 +20,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * worker 主循环：长轮询 claim 会话、为每个会话创建 agent 与 harness、投递事件、心跳维持租约，
+ * 并在退出时释放 claim。接入方通常用 {@link OmaHarnessRunner} 间接使用它；这里只暴露给需要
+ * 精细控制生命周期的高级场景（见 builder 的 endpoint / agentFactory / concurrency 等配置）。
+ */
 public final class OmaWorker implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(OmaWorker.class);
     private static final long[] RETRY_DELAYS_MS = {1_000, 2_000, 5_000, 10_000, 30_000};
@@ -134,7 +139,8 @@ public final class OmaWorker implements AutoCloseable {
         } finally {
             active.remove(claim.sessionId());
             try {
-                claims.release(claim, "finished");
+                claims.release(claim, "idle");
+                LOG.debug("claim released session={} epoch={} reason=idle", claim.sessionId(), claim.workerEpoch());
             } catch (RuntimeException e) {
                 LOG.debug("release failed: {}", e.getMessage());
             }

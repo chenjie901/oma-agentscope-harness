@@ -2,6 +2,10 @@ package ai.oma.harness.core.transport;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+/**
+ * OMA 服务端下发给 worker 的一条事件（user.message、user.interrupt 等），带 sequence 用于
+ * 服务端去重与重放。worker 长轮询拿到后交给 {@code HarnessAgent.deliver(...)} 处理。
+ */
 public record InboundEvent(
         long sequenceNum,
         String eventId,

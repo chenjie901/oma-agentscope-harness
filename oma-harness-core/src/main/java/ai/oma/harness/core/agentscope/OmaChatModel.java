@@ -1,4 +1,4 @@
-package ai.oma.harness.agentscope;
+package ai.oma.harness.core.agentscope;
 
 import ai.oma.harness.core.OmaConfig;
 import ai.oma.harness.core.json.Json;
@@ -25,16 +25,22 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+/**
+ * AgentScope {@link ChatModelBase} 的 OMA 实现：把 AgentScope 的模型调用桥接到 OMA 模型代理。
+ *
+ * <p>接入方不直接 new 这个类，而是用 {@code OmaAgentSupport.chatModel()} 取得由 core 创建好的实例，
+ * 在 {@code buildAgent} 中传给 agent 的 model。这样所有模型请求都会经过 OMA 代理（含
+ * chat_completions 后端自动切换），并记录 {@link #lastRequestId()} 供事件去重使用。
+ *
+ * <p>职责：把 AgentScope 的 messages/tools 转换为 OMA 的 ModelRequest，再把 OMA 返回的 text /
+ * tool_use 内容块转换回 AgentScope 的 ChatResponse。
+ */
 public final class OmaChatModel extends ChatModelBase {
     private final OmaModelClient client;
     private volatile String model;
     private volatile Runnable requestHook = () -> {
     };
     private volatile String lastRequestId;
-
-    public OmaChatModel(OmaConfig config, String model) {
-        this(config, model, null);
-    }
 
     public OmaChatModel(OmaConfig config, String model, String apiBackend) {
         this.client = new OmaModelClient(config, apiBackend);

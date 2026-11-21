@@ -14,6 +14,10 @@ import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * 控制面客户端：上报 worker 的 turn 状态（PUT /worker）、权限/工具刷新请求与批准结果。
+ * turn envelope（TurnStarted/TurnCompleted）也通过这里上报，而不是当普通事件发送。core 内部使用。
+ */
 public final class ControlPlane {
     private static final Logger LOG = LoggerFactory.getLogger(ControlPlane.class);
 

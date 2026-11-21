@@ -23,6 +23,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * chat_completions 兼容后端的流式 HTTP 客户端：当会话上下文的 api_backend 为
+ * {@code chat_completions} 时，OmaModelClient 会用它与后端直接通信。core 内部使用。
+ */
 public final class ChatCompletionsClient {
     private static final Logger LOG = LoggerFactory.getLogger(ChatCompletionsClient.class);
     private final OmaConfig config;

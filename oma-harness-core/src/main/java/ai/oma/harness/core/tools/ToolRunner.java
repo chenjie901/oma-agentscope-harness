@@ -12,6 +12,10 @@ import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * 工具执行器：OmaToolkit 注册的工具最终都走这里——先发工具调用请求、必要时等待用户审批，
+ * 再返回 {@link ToolResult}。它是"工具调用走 OMA 规范"的关键，接入方不要绕过。
+ */
 public final class ToolRunner {
     private static final Logger LOG = LoggerFactory.getLogger(ToolRunner.class);
     private static final Duration APPROVAL_TIMEOUT = Duration.ofMinutes(5);

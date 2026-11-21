@@ -12,6 +12,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
+/** 会话级 HTTP 请求工具：统一拼接 worker token 与 session id 头，供 tools 包内客户端复用。 */
 final class SessionHttp {
     record Response(int status, JsonNode body) {
         boolean ok() {

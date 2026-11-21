@@ -8,6 +8,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * 历史消息的构造与解析工具：把服务端事件流中的 user/assistant 文本消息解析为
+ * {@link RestoredMessage}，供 {@code OmaAgentSupport} 恢复到 agent 上下文；也提供构造
+ * transcript 事件的静态方法供 core 持久化 assistant 回复。接入方通常不直接使用。
+ */
 public final class Transcript {
     private Transcript() {
     }

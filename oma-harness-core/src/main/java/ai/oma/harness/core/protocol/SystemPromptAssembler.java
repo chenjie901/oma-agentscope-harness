@@ -6,6 +6,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 按 DSH 规范分层组装 System prompt。core 在会话启动时调用它，并把结果传给
+ * {@code OmaAgentSupport.buildAgent(String)}；接入方通常无需直接调用，除非要自定义 prompt 层。
+ *
+ * <p>层顺序固定为：平台内置规则（platform rules）→ 可选的子 agent 限制 → 环境提示
+ * （environment_prompt）→ Agent instructions（system_prompt/custom_system_prompt）→
+ * 会话信息（cwd、memory_catalog_prompt）。注意：platform rules 是本地内置的，<b>不是</b>服务端下发；
+ * 服务端只下发后几层。空层会被跳过。
+ */
 public final class SystemPromptAssembler {
     private static final int MAX_LIVE_SUBAGENT_THREADS = 25;
 

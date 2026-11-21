@@ -3,6 +3,10 @@ package ai.oma.harness.core.model;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 发给 OMA 模型代理的请求：model、system prompt、messages、tools、max_tokens 等。
+ * 由 OmaChatModel 从 AgentScope 调用转换而来；接入方无需直接构造。
+ */
 public record ModelRequest(
         String model,
         String system,

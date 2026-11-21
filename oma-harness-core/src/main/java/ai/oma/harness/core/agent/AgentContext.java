@@ -16,8 +16,14 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Duration;
 import java.util.List;
 
+/**
+ * Agent 与 OMA 服务端交互的上下文接口，由 core 的 worker 实现并注入到
+ * {@link HarnessAgent#start(AgentContext)}。接入方通常不需要直接实现或使用它，
+ * 只在自定义 prompt/工具策略时才需要了解其中的能力（事件发射、工具调用、审批、历史恢复等）。
+ */
 public interface AgentContext {
 
+    /** 当前 code session id。 */
     String sessionId();
 
     String threadId();

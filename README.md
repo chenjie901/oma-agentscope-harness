@@ -1,38 +1,57 @@
 # OMA Harness SDK (Java)
 
-把 OMA 的 worker 协议封装成可被任意 harness 装配的 SDK。harness 只需替换四个组件，就能接入 OMA 的沙箱、模型代理、凭据、文件挂载与 transcript。
+面向 AgentScope 用户的 OMA 接入 SDK。用户用自己的 AgentScope Agent，只需实现自己的 `OmaAgent`（装配业务所需组件），即可用 core 提供的能力严格按 OMA/CCRV2 规范接入，无需重复编写协议胶水。
 
 生产代码统一使用 SLF4J API，由 Log4j2 实现（并保留 JUL→SLF4J 桥接兼容第三方库），控制台与滚动文件同时输出；文件路径默认 `/tmp/oma-harness/logs/harness.log`，可用 `-Doma.harness.log.dir=<dir>` 覆盖。关键路径（claim、上下文加载、工具注册、审批、工具调用与结果、transcript 同步、心跳失败）都有日志。
 
 ## 模块
 
-| 模块 | 内容 | 是否框架相关 |
+| 模块 | 内容 | 面向用户 |
 |---|---|---|
-| `oma-harness-core` | 传输、事件映射、模型客户端、工具客户端、资源加载 | 否 |
-| `oma-harness-agentscope` | 真实 AgentScope 适配层：`ReActAgent` + `ChatModelBase` + `AgentTool` | 是 |
+| `oma-harness-core` | OMA worker 协议、事件映射、模型/工具客户端、MCP、诊断/OTLP/附件，以及 AgentScope 适配组件（`OmaChatModel`、`OmaToolkit`）、规范基类 `OmaAgentSupport`、一站式入口 `OmaHarnessRunner` | 是（主 SDK，显式依赖 `io.agentscope:agentscope-core`） |
+| `oma-harness-agentscope` | 参考实现：`OmaAgent`（继承 `OmaAgentSupport`，装配 `ReActAgent`）与启动 `Main` | 否（示例，可照此写自己的 agent） |
 
-## 装配方式
+## 快速接入（用户视角）
 
-`oma-harness-agentscope` 直接依赖 `io.agentscope:agentscope-core`，推理循环由 AgentScope 的 `ReActAgent` 负责，OMA 侧只提供扩展点实现：
-
-| AgentScope 扩展点 | OMA 实现 | 说明 |
-|---|---|---|
-| `ChatModelBase.doStream` | `OmaChatModel` | 全部模型调用走 OMA 代理；`/v1/messages` 遇到 `chat_completions` 后端时自动切 `/v1/chat/completions` 流式 |
-| `AgentTool` | `OmaToolkit` | 按 `session_context.runtime_tools` 动态注册 `ToolCatalog` 中的工具，执行经 `ToolRunner` 走审批与 OMA 分发 |
-| `ReActAgent` | `OmaAgent` | `agent.stream(...)` 驱动 ReAct 循环，`Event` 映射成 `CanonicalEvent` 后上行 |
-| `HarnessAgent` | `OmaAgent` | `deliver` 消费 `user.message` / `user.interrupt` |
+用户实现自己的 `OmaAgent`，继承 `OmaAgentSupport`，只需在 `buildAgent` 中装配并返回自己的 `ReActAgent`。消息历史恢复、事件流驱动、中断、关闭全部由 SDK 在 core 内实现，用户不可覆写：
 
 ```java
-OmaWorker worker = OmaWorker.builder()
-        .endpoint(System.getenv("OMA_API_URL"))
-        .claimToken(System.getenv("OMA_BRAIN_CLAIM_TOKEN"))
-        .agentFactory(OmaAgent::new)
-        .build();
+public final class MyAgent extends OmaAgentSupport {
+    public MyAgent(OmaConfig config, SessionContext session) {
+        super(config, session);
+    }
 
-worker.run();
+    @Override protected ReActAgent buildAgent(String systemPrompt) {
+        return ReActAgent.builder()
+                .name("my-agent")
+                .sysPrompt(systemPrompt)
+                .model(chatModel())      // core 提供的 OMA 模型代理
+                .toolkit(toolkit().toolkit()) // core 提供的工具集（含 MCP）
+                .maxIters(20)
+                .build();
+    }
+}
 ```
 
-`OmaAgent` 只做三件事：把 `user.message` 转成 `UserMessage` 交给 `agent.stream(...)`、把 `Event` 中的 text/tool_use/tool_result 映射为 OMA 事件、维护 turn 与 session 状态上报。循环次数（`maxIters`）与 prompt 由 AgentScope 决定；工具集合由服务端下发的 `runtime_tools` 决定。
+启动只需提供 `agentFactory`，其余（JUL bridge、环境变量、OmaWorker、shutdown hook）由 runner 完成：
+
+```java
+OmaHarnessRunner.builder()
+        .agentFactory(MyAgent::new)
+        .build()
+        .run();
+```
+
+### core 提供的可复用能力
+
+| 能力 | 类型 | 说明 |
+|---|---|---|
+| OMA 模型代理 | `OmaChatModel` | AgentScope `ChatModelBase` 实现，全部模型调用走 OMA 代理；`chat_completions` 后端自动切换；`lastRequestId` 供去重 |
+| 工具桥 | `OmaToolkit` | 按 `runtime_tools` 动态注册 `ToolCatalog` 工具，执行经 `ToolRunner` 走审批与 OMA 分发，含 MCP 工具 |
+| 规范基类 | `OmaAgentSupport` | 模板化 `start`/`deliver`/`applyModel`/`close`，并私有实现消息历史恢复（截断 + 角色映射）、`streamEvents` 事件流驱动、中断、关闭；AgentScope 细粒度事件到 OMA 事件的聚合与去重、transcript 恢复、权限/MCP 刷新、prompt 组装、turn/session 状态全部由 core 控制；用户只实现 `buildAgent` 返回 `ReActAgent` |
+| 一站式入口 | `OmaHarnessRunner` | 封装 JUL bridge、环境变量、OmaWorker builder、shutdown hook；`OmaWorker.builder()` 仍作为高级入口保留 |
+
+`OmaAgentSupport` 中 ack 时序、稳定 `sevt_` id、interrupt 即时处理由 core 既有设施（`OmaHarness`/`OmaEventMapper`）保证，用户不可绕过。`buildAgent(String systemPrompt)` 是唯一扩展点，返回的 `ReActAgent` 由 core 持有并驱动；`restoreMessages`/`streamTurn`/`interruptTurn`/`close` 均为 core 私有方法，用户不可覆写。`publishEvent(AgentEvent)` 为 protected final，把 AgentScope 的 `TextBlock*`/`ToolCall*`/`ToolResult*` 生命周期事件聚合为 OMA 的 `MessageCompleted`/`ToolCallStarted`/`ToolCallCompleted`，并在 `End` 事件时发射，保证去重与 `sevt_` 稳定 id 一致。
 
 工具清单（`tools/ToolCatalog`）：
 
@@ -183,7 +202,7 @@ context.emitNative(Json.parse("{\"type\":\"agent.message\",\"uuid\":\"e1\",\"mes
 |---|---|---|
 | `Model` 可注入 | `OmaChatModel extends ChatModelBase` | 必须实现 `doStream` 与 `getModelName` |
 | `Toolkit` 可委托 | `Toolkit.registerAgentTool(AgentTool)` | 工具执行异常不能抛穿，否则 ReAct 循环中断 |
-| 事件流 | `agent.stream(msgs, StreamOptions, RuntimeContext)` | 用 `incremental(false)` 拿整块 text/tool_use |
+| 事件流 | `agent.streamEvents(msgs, RuntimeContext)` 返回 `Flux<AgentEvent>` | 旧的 `stream(...)` 自 AgentScope 2.0.0 起已废弃；support 按 `TextBlockStart/Delta/End`、`ToolCallStart/Delta/End`、`ToolResultStart/Delta/End` 聚合后发射 OMA 事件 |
 | 中断入口 | `agent.interrupt(runtimeContext)` | 必须带 RuntimeContext，否则落到 `__anon__` 槽位不生效 |
 | 历史注入 | `getAgentState(ctx).contextMutable()` | 仅在 `stateStore == null` 时保持有效 |
 

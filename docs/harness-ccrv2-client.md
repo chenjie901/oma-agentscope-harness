@@ -1,6 +1,14 @@
 # Java Harness 的 CCRv2 客户端接入
 
-本文描述 `aca/oma-harness-core` 作为 CCRv2 worker 客户端时，对服务端 `internal/codesessions` 契约的覆盖范围、恢复流程、控制面、工具审批与本地持久化行为。协议语义以服务端代码与 `oma-brain-dsh` 为准，本文只说明 harness 侧如何落地。
+本文描述 `oma-harness-core` 作为 CCRv2 worker 客户端时，对服务端 `internal/codesessions` 契约的覆盖范围、恢复流程、控制面、工具审批与本地持久化行为。协议语义以服务端代码与 `oma-brain-dsh` 为准，本文只说明 harness 侧如何落地。
+
+## 0. SDK 分层
+
+`oma-harness-core` 是面向 AgentScope 用户的接入 SDK（显式依赖 `io.agentscope:agentscope-core`），提供三类可复用能力：适配组件 `OmaChatModel`/`OmaToolkit`（`core/agentscope`）、规范基类 `OmaAgentSupport`（`core/agent`）、一站式入口 `OmaHarnessRunner`。用户实现自己的 `OmaAgent` 继承 support 并装配自有 Agent，core 保证协议规范不被绕过。`oma-harness-agentscope` 模块的 `OmaAgent`/`Main` 仅为参考实现。
+
+`OmaAgentSupport` 只有单一扩展点：用户实现 `buildAgent(String systemPrompt)` 装配并返回 `ReActAgent`（core 持有并驱动），其余全部由 core 私有实现、用户不可覆写：`start` 的 chatModel/toolkit/refreshMcp/sync 顺序、`deliver` 的 turn envelope + `publishEvent` 去重、`applyModel`/`close` 生命周期，以及消息历史恢复（最后 `RESTORE_MESSAGE_LIMIT` 条、`assistant` 角色映射）、`streamEvents` 事件流驱动、`interrupt`、`close`。`streamTurn` 基于 AgentScope 2.0+ 的 `ReActAgent.streamEvents(msgs, RuntimeContext)`（旧 `stream(...)` 已废弃）；`publishEvent(AgentEvent)` 按 `TextBlockStart/Delta/End` 聚合文本、`ToolCallStart/Delta/End` 聚合工具入参、`ToolResultStart/Delta/End` 聚合工具输出，在 `End` 事件时分别发射 `MessageCompleted`/`ToolCallStarted`/`ToolCallCompleted`，`ToolResultDataDeltaEvent` 不进入 OMA 文本 content。ack 时序、稳定 `sevt_` id、interrupt 即时处理已在 `OmaHarness`/`OmaEventMapper` 实现，support 只保证不破坏它们。详见 README「快速接入」。
+
+claim 释放 reason 必须为服务端白名单值 `admission_failed` / `shutdown` / `idle` / `permanent` 之一；`OmaWorker` 正常/空闲结束用 `idle`。用其它值（如 `finished`）会被服务端 400 拒绝，claim 只能靠 lease 过期兜底释放，造成会话释放延迟。
 
 ## 1. 覆盖范围
 

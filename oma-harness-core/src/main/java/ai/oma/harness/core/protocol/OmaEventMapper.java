@@ -13,6 +13,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+/**
+ * 把 core 内部的 {@link CanonicalEvent} 转换为 OMA 服务端要求的 wire 事件 JSON。
+ *
+ * <p>负责生成稳定 {@code sevt_} id（基于 session + 内容摘要）、保证 {@code processed} 先于
+ * result、以及各类事件的字段映射。接入方无需直接使用；事件由 core 的 OmaHarness 统一上报。
+ */
 public final class OmaEventMapper {
     private final String codeSessionId;
 

@@ -6,6 +6,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 模型代理返回的一次响应：stop reason、内容块（文本 / tool_use）、token 用量与原始响应。
+ * 由 OmaModelClient 解析，OmaChatModel 再转成 AgentScope 的 ChatResponse。
+ */
 public record ModelReply(
         String stopReason,
         List<Map<String, Object>> content,

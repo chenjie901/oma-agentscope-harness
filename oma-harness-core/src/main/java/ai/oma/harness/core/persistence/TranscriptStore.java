@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
+/** transcript 存储：把 user/assistant 消息写入会话 transcript，供服务端展示与历史恢复。core 内部使用。 */
 public final class TranscriptStore {
     private static final Logger LOG = LoggerFactory.getLogger(TranscriptStore.class);
     public static final String DIVERGED = "Local and remote log histories diverged";

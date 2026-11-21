@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+/** OMA 工具调用客户端：把一次工具调用（含审批）发给服务端并拿回结果。由 ToolRunner 使用。 */
 public final class OmaToolClient {
     private static final Logger LOG = LoggerFactory.getLogger(OmaToolClient.class);
     private static final Set<String> ACTIVE_STATES =

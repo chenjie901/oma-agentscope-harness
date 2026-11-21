@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.InputStream;
 import java.util.List;
 
+/** 全局 Jackson 工具：统一的 ObjectMapper 与 JsonNode 构造/读取方法，core 内部使用。 */
 public final class Json {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

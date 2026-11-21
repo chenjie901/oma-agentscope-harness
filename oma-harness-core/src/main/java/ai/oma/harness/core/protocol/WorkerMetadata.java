@@ -4,6 +4,7 @@ import ai.oma.harness.core.json.Json;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+/** worker 元数据：向服务端声明 harness 类型、版本与能力集，用于后端识别与兼容。core 内部使用。 */
 public final class WorkerMetadata {
     private final ObjectNode raw;
 
@@ -52,16 +53,6 @@ public final class WorkerMetadata {
             copy.remove("model");
         } else {
             copy.put("model", model);
-        }
-        return new WorkerMetadata(copy);
-    }
-
-    public WorkerMetadata withPermissionMode(String mode) {
-        ObjectNode copy = raw.deepCopy();
-        if (mode == null || mode.isBlank()) {
-            copy.remove("permission_mode");
-        } else {
-            copy.put("permission_mode", mode);
         }
         return new WorkerMetadata(copy);
     }

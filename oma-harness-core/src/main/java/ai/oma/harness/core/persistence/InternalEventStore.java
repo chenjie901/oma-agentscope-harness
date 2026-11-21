@@ -13,6 +13,10 @@ import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * 内部事件存储：保存不直接对外的内部事件（如 processed 标记），供事件去重与状态恢复使用。
+ * core 内部使用，接入方无需关心。
+ */
 public final class InternalEventStore {
     private static final Logger LOG = LoggerFactory.getLogger(InternalEventStore.class);
     private static final int SEEN_CAPACITY = 4096;

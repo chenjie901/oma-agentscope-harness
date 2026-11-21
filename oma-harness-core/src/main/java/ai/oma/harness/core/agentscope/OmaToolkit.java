@@ -1,4 +1,4 @@
-package ai.oma.harness.agentscope;
+package ai.oma.harness.core.agentscope;
 
 import ai.oma.harness.core.agent.AgentContext;
 import ai.oma.harness.core.claim.SessionContext;
@@ -26,6 +26,16 @@ import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * AgentScope {@link Toolkit} 与 OMA 工具体系的桥接器。
+ *
+ * <p>接入方不直接 new 这个类，而是用 {@code OmaAgentSupport.toolkit()} 取得 core 创建好的实例，
+ * 在 {@code buildAgent} 中把 {@link #toolkit()} 传给 agent 的 toolkit。这样模型眼中的工具调用
+ * 都会经 {@link ToolRunner} 走 OMA 的审批与分发，并自动包含服务端下发的 MCP 工具。
+ *
+ * <p>{@link #sync(SessionContext, List)} 由 core 在会话启动和工具刷新时调用，按服务端下发的
+ * runtime_tools / 权限动态注册工具；接入方无需手动调用。
+ */
 public final class OmaToolkit {
     private static final Logger LOG = LoggerFactory.getLogger(OmaToolkit.class);
     private final Toolkit toolkit = new Toolkit();
@@ -36,14 +46,15 @@ public final class OmaToolkit {
         this.runner = new ToolRunner(context, sessions);
     }
 
+    /**
+     * 取得交给 AgentScope agent 的 toolkit。接入方在 buildAgent 中应使用
+     * {@code toolkit(toolkit().toolkit())}，不要自行创建 Toolkit。
+     */
     public Toolkit toolkit() {
         return toolkit;
     }
 
-    public synchronized void sync(SessionContext context) {
-        sync(context, List.of());
-    }
-
+    /** 按会话上下文与 MCP 工具列表同步工具注册，由 core 在启动与权限刷新时调用。 */
     public synchronized void sync(SessionContext context, List<McpToolBinding> mcpTools) {
         List<ToolSpec> enabled = ToolCatalog.enabled(context, mcpTools);
         Map<String, ToolSpec> keep = new LinkedHashMap<>();

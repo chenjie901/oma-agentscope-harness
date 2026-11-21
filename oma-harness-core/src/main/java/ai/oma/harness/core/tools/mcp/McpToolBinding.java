@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.Map;
 
+/** 一个 MCP 工具的绑定信息：展示名、所属 server、远端工具名等，用于动态注册到工具目录。 */
 public record McpToolBinding(String displayName, String serverName, String remoteName,
                              String description, JsonNode inputSchema) {
 

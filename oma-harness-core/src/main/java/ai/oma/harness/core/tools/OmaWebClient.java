@@ -9,6 +9,7 @@ import java.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/** OMA web 工具客户端：向服务端发起网页抓取/搜索请求，供 OmaToolkit 注册为工具。core 内部使用。 */
 public final class OmaWebClient {
     private static final Logger LOG = LoggerFactory.getLogger(OmaWebClient.class);
     public static final String STORAGE_ERROR = "Full content could not be saved; only the preview is available.";

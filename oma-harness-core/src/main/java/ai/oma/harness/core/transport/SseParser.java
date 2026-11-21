@@ -6,6 +6,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.util.function.LongConsumer;
 
+/** SSE（Server-Sent Events）流解析器：把事件流响应按 data 行拆成 JSON 事件，供模型代理等流式接口使用。 */
 public final class SseParser {
     private final BufferedReader reader;
     private final LongConsumer onFrame;

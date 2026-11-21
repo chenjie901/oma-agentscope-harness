@@ -21,6 +21,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * OMA 模型代理客户端：按会话的 api_backend 选择消息接口或 chat_completions 接口发起请求，
+ * 返回统一的 {@link ModelReply} 并记录 request id。由 OmaChatModel 调用。
+ */
 public final class OmaModelClient {
     private static final Logger LOG = LoggerFactory.getLogger(OmaModelClient.class);
     private static final String BACKEND_MESSAGES = "messages";

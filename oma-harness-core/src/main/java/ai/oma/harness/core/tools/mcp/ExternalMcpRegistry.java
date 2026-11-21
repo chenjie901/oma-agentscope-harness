@@ -14,6 +14,10 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * 外部 MCP server 注册表：根据会话下发的 MCP 配置连接 server、发现工具并维护生命周期，
+ * 把工具暴露给 ToolCatalog。由 core 在 refreshMcp 时调用。
+ */
 public final class ExternalMcpRegistry implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(ExternalMcpRegistry.class);
 

@@ -10,6 +10,10 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.function.LongSupplier;
 
+/**
+ * 会话附件存储：把 agent 产出的文件按内容摘要写入 OMA 服务端，换取可引用句柄。
+ * 由 core 在需要落附件时使用，接入方无需直接调用。
+ */
 public final class AttachmentStore {
     private static final Logger LOG = LoggerFactory.getLogger(AttachmentStore.class);
 

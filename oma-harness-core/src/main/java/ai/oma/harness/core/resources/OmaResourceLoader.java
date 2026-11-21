@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
+/** 资源加载器：从 OMA 服务端拉取会话可用的 skills / resources，注入到工具与 prompt 上下文。core 内部使用。 */
 public final class OmaResourceLoader {
     private final OmaConfig config;
     private final HttpClient http;

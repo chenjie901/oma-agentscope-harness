@@ -13,6 +13,10 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
+/**
+ * brain claim 协议客户端：向 OMA 服务端 claim 一个待处理会话（长轮询），并在退出时释放。
+ * 由 OmaWorker 使用，接入方无需直接接触。
+ */
 public final class BrainClaimClient {
     private static final long MAX_BLOCK_MS = 30_000;
 

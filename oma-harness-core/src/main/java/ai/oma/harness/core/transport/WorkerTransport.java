@@ -18,6 +18,10 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 
+/**
+ * worker 与 OMA 服务端之间的 HTTP 传输层：长轮询事件流、上报事件、心跳、读写 transcript 等。
+ * 所有请求自动带 worker token 与 session id，并处理重连与超时。接入方无需直接使用。
+ */
 public final class WorkerTransport {
     private static final Logger LOG = LoggerFactory.getLogger(WorkerTransport.class);
     private static final int GET_ATTEMPTS = 10;

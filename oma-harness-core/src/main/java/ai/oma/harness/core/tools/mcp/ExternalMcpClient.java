@@ -20,6 +20,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+/** 外部 MCP server 客户端：按 MCP 协议发现工具、调用工具，供 ExternalMcpRegistry 管理。core 内部使用。 */
 public final class ExternalMcpClient implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(ExternalMcpClient.class);
     private static final String PROTOCOL_2024 = "2024-11-05";

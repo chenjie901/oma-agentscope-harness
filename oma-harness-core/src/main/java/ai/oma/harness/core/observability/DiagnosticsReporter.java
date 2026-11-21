@@ -2,7 +2,6 @@ package ai.oma.harness.core.observability;
 
 import ai.oma.harness.core.json.Json;
 import ai.oma.harness.core.transport.WorkerTransport;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,6 +10,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.function.LongSupplier;
 
+/** 诊断指标上报：把 worker 的运行状态与异常以 diagnostics 事件写入本地日志与服务端。core 内部使用。 */
 public final class DiagnosticsReporter {
     private static final Logger LOG = LoggerFactory.getLogger(DiagnosticsReporter.class);
     private static final Set<String> ALLOWED_KINDS = Set.of(

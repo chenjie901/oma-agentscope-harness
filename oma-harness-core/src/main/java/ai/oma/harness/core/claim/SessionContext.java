@@ -20,6 +20,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * 服务端下发的会话上下文快照：model、api_backend、system prompt 各层、cwd、运行时工具与权限、
+ * MCP 配置等。由 {@link #load(OmaConfig)} 在会话启动时拉取，{@link #refresh(OmaConfig, String)}
+ * 在每次模型请求或工具刷新时重新拉取。
+ *
+ * <p>接入方通常不直接构造它：构造器由 runner 调用；在自定义逻辑里若需要读取当前值，
+ * 可用 {@code OmaAgentSupport.session()}。
+ */
 public final class SessionContext {
     private static final Logger LOG = LoggerFactory.getLogger(SessionContext.class);
     public static final String BACKEND_MESSAGES = "messages";
@@ -28,7 +36,6 @@ public final class SessionContext {
 
     private final String model;
     private final String apiBackend;
-    private final String systemPrompt;
     private final String agentInstructions;
     private final String environmentPrompt;
     private final String memoryCatalogPrompt;
@@ -38,20 +45,19 @@ public final class SessionContext {
     private final JsonNode mcpConfig;
     private final JsonNode subagents;
 
-    private SessionContext(String model, String apiBackend, String systemPrompt, String cwd,
+    private SessionContext(String model, String apiBackend, String agentInstructions, String cwd,
                            List<String> runtimeTools, Map<String, String> toolPermissions,
                            JsonNode mcpConfig, JsonNode subagents) {
-        this(model, apiBackend, systemPrompt, systemPrompt, null, null, cwd,
+        this(model, apiBackend, agentInstructions, null, null, cwd,
                 runtimeTools, toolPermissions, mcpConfig, subagents);
     }
 
-    private SessionContext(String model, String apiBackend, String systemPrompt, String agentInstructions,
+    private SessionContext(String model, String apiBackend, String agentInstructions,
                            String environmentPrompt, String memoryCatalogPrompt, String cwd,
                            List<String> runtimeTools, Map<String, String> toolPermissions,
                            JsonNode mcpConfig, JsonNode subagents) {
         this.model = model;
         this.apiBackend = apiBackend;
-        this.systemPrompt = systemPrompt;
         this.agentInstructions = agentInstructions;
         this.environmentPrompt = environmentPrompt;
         this.memoryCatalogPrompt = memoryCatalogPrompt;
@@ -78,16 +84,13 @@ public final class SessionContext {
         return fetch(config, threadId);
     }
 
+    /** 当前会话使用的模型 id。 */
     public String model() {
         return model;
     }
 
     public String apiBackend() {
         return apiBackend;
-    }
-
-    public String systemPrompt() {
-        return systemPrompt;
     }
 
     public String agentInstructions() {
@@ -165,7 +168,6 @@ public final class SessionContext {
         return new SessionContext(
                 model,
                 apiBackend(context, model),
-                systemPrompt(context),
                 agentInstructions(context),
                 Json.text(context, "append_system_prompt"),
                 Json.text(context, "memory_catalog_prompt"),
@@ -256,15 +258,4 @@ public final class SessionContext {
         return base;
     }
 
-    private static String systemPrompt(JsonNode context) {
-        String base = agentInstructions(context);
-        String appended = Json.text(context, "append_system_prompt");
-        if (appended == null || appended.isBlank()) {
-            return base;
-        }
-        if (base == null || base.isBlank()) {
-            return appended;
-        }
-        return base + "\n\n" + appended;
-    }
 }
