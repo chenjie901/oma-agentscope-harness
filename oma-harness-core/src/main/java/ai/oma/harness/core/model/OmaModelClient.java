@@ -166,6 +166,12 @@ public final class OmaModelClient {
                     entry.put("input", block.get("input"));
                 }
                 case "thinking" -> entry.put("thinking", Json.text(block, "thinking"));
+                case "image" -> {
+                    JsonNode source = block.get("source");
+                    if (source != null && source.isObject()) {
+                        entry.put("source", ImageBlocks.parseSource(source));
+                    }
+                }
                 default -> entry.put("raw", block);
             }
             content.add(entry);

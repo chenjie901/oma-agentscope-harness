@@ -24,6 +24,7 @@ import ai.oma.harness.core.tools.mcp.McpToolBinding;
 import ai.oma.harness.core.claim.SessionContext;
 import ai.oma.harness.core.observability.DiagnosticsReporter;
 import ai.oma.harness.core.observability.OtlpExporter;
+import ai.oma.harness.core.observability.SessionMdc;
 import ai.oma.harness.core.attachments.AttachmentStore;
 import ai.oma.harness.core.transport.InboundEvent;
 import ai.oma.harness.core.transport.OmaHttpException;
@@ -127,6 +128,15 @@ public final class OmaHarness implements AutoCloseable {
     }
 
     public void run() {
+        Map<String, String> previousMdc = SessionMdc.captureAndPut(config.sessionId());
+        try {
+            runSession();
+        } finally {
+            SessionMdc.restore(previousMdc);
+        }
+    }
+
+    private void runSession() {
         long reconnectStartedAt = System.nanoTime();
         long backoffMillis = 500;
         epoch = transport.register();
@@ -137,11 +147,12 @@ public final class OmaHarness implements AutoCloseable {
         } catch (Exception e) {
             throw new IllegalStateException("harness failed to start", e);
         }
-        scheduler.scheduleWithFixedDelay(this::heartbeatSafely,
+        scheduler.scheduleWithFixedDelay(SessionMdc.wrap(config.sessionId(), this::heartbeatSafely),
                 config.heartbeatInterval().toMillis(), config.heartbeatInterval().toMillis(), TimeUnit.MILLISECONDS);
-        scheduler.scheduleWithFixedDelay(this::watchdog,
+        scheduler.scheduleWithFixedDelay(SessionMdc.wrap(config.sessionId(), this::watchdog),
                 config.streamIdleTimeout().toMillis(), 1000, TimeUnit.MILLISECONDS);
-        scheduler.scheduleWithFixedDelay(this::keepAliveSafely, 30_000, 30_000, TimeUnit.MILLISECONDS);
+        scheduler.scheduleWithFixedDelay(SessionMdc.wrap(config.sessionId(), this::keepAliveSafely),
+                30_000, 30_000, TimeUnit.MILLISECONDS);
         heartbeatSafely();
         while (!closed.get()) {
             try {
@@ -265,7 +276,7 @@ public final class OmaHarness implements AutoCloseable {
             return;
         }
         try {
-            turns.execute(() -> deliver(event));
+            turns.execute(SessionMdc.wrap(config.sessionId(), () -> deliver(event)));
         } catch (RejectedExecutionException e) {
             LOG.debug("harness closed before event dispatch: {}", e.getMessage());
         }
@@ -350,7 +361,7 @@ public final class OmaHarness implements AutoCloseable {
         }
         acknowledge(event, "processing");
         ScheduledFuture<?> renewal = scheduler.scheduleAtFixedRate(
-                () -> acknowledge(event, "processing"), PROCESSING_RENEWAL_SECONDS,
+                SessionMdc.wrap(config.sessionId(), () -> acknowledge(event, "processing")), PROCESSING_RENEWAL_SECONDS,
                 PROCESSING_RENEWAL_SECONDS, TimeUnit.SECONDS);
         processingRenewals.put(eventId, renewal);
     }

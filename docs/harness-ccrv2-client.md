@@ -229,7 +229,7 @@ flowchart TD
 - delivery-progress：收到事件立即回 `received`，处理中每 60s 续期 `processing`，完成回 `processed`（`processed` 先于 turn result）。
 - diagnostics：`DiagnosticsReporter` 仅上报白名单种类（`oma_runtime_event` / `oma_model_request_retry` / `oma_runtime_input_failed`），由 `OMA_OBSERVABILITY_ENABLED` 开关控制，默认只写日志。
 - OTLP：`OtlpExporter` 对 `otlp/v1/logs`、`otlp/v1/traces` 转发 OTLP/JSON，同样受 `OMA_OBSERVABILITY_ENABLED` 控制，默认 no-op；单批超 8MB 丢弃并记 DEBUG。
-- 附件：`AttachmentStore` 通过 `image-attachments/{sha256}` PUT 上传（SHA-256 命名），`message-attachments/{file_id}/content` GET 读取，均带 epoch 栅栏。
+- 附件：`AttachmentStore` 通过 `image-attachments/{sha256}` PUT 上传（SHA-256 命名），`message-attachments/{file_id}/content` GET 读取，均带 epoch 栅栏。用户消息的 `image` 块由 `UserContentResolver` 处理：`file` 来源经 GET 读取私有附件后 base64 编码，`base64` 来源直接内联，`url` 来源保持 URL；统一转为 AgentScope `ImageBlock` 并注入 `UserMessage`，纯图片消息也启动回合。模型请求按 backend 序列化为 Anthropic image block 或 OpenAI `image_url` data URL；附件缺失/解码失败单张降级跳过，transcript 与 internal events 只保留文本、不落图片字节。模型返回的图片块由 `ImageBlocks` 解析（含 OpenAI data URL / `images` 扩展字段），经 `finalBlocks()` 转为 AgentScope `ImageBlock` 进入最终 `ChatResponse.content`；但 AgentScope 无图片事件、DSH assistant 转换过滤非文本块、前端 trace 仅渲染文本，故输出图片暂不在前端消息时间线显示为图片（需另行打通 DSH/前端）。
 - batch-uploader / retry：`InternalEventStore` 的 100ms 起、30s 上限、10 次退避与现有 PUT 去重窗口等价覆盖，未抽取为独立通用组件。
 
 ## 9. 验收

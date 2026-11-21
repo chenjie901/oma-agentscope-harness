@@ -4,12 +4,14 @@ import ai.oma.harness.core.agent.HarnessAgent;
 import ai.oma.harness.core.claim.BrainClaimClient;
 import ai.oma.harness.core.claim.ClaimedSession;
 import ai.oma.harness.core.claim.SessionContext;
+import ai.oma.harness.core.observability.SessionMdc;
 import ai.oma.harness.core.transport.OmaHttpException;
 
 import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -100,6 +102,15 @@ public final class OmaWorker implements AutoCloseable {
     }
 
     private void serve(ClaimedSession claim) {
+        Map<String, String> previousMdc = SessionMdc.captureAndPut(claim.sessionId());
+        try {
+            serveClaim(claim);
+        } finally {
+            SessionMdc.restore(previousMdc);
+        }
+    }
+
+    private void serveClaim(ClaimedSession claim) {
         if (!active.add(claim.sessionId())) {
             LOG.warn("session " + claim.sessionId() + " is already served by this worker; ignoring duplicate claim epoch="
                     + claim.workerEpoch());
@@ -124,7 +135,8 @@ public final class OmaWorker implements AutoCloseable {
                 thread.setDaemon(true);
                 return thread;
             });
-            idleWatchdog.scheduleWithFixedDelay(() -> retireIfIdle(harness, claim), 2, 2, TimeUnit.SECONDS);
+            idleWatchdog.scheduleWithFixedDelay(
+                    SessionMdc.wrap(claim.sessionId(), () -> retireIfIdle(harness, claim)), 2, 2, TimeUnit.SECONDS);
             try {
                 harness.run();
             } finally {

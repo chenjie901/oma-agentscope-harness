@@ -1,8 +1,14 @@
-# OMA Harness SDK (Java)
+# OMA Brain Java 版（DSH 的 Java 实现）
+
+**OMA Brain 现在支持 Java 了。** 本仓库是 [OMA](https://github.com/superduck-ai/open-managed-agents) Brain 的 Java 实现，等价于 DSH（DeepSeek Harness）的 Java 版本：它让基于 Java / AgentScope 的 Agent 能够以 OMA worker 协议接入 OMA 会话，与 TypeScript 版 DSH 处于同一位置、遵循同一套 OMA/CCRV2 规范。
+
+- **OMA（Open Managed Agents）**：<https://github.com/superduck-ai/open-managed-agents>，定义 Brain ↔ Worker 协议以及会话、事件、工具、审批等契约的服务端仓库。
+- **底层 harness**：<https://github.com/agentscope-ai/agentscope>。本实现基于 AgentScope 的 `ReActAgent`、细粒度事件流与 `ChatModelBase` 等能力，本 SDK 是其上的 OMA 接入层。
+- **本仓库定位**：DSH 的 Java 版本（OMA Brain 的 Java worker），实现与 DSH 一致的工具、审批、事件映射、transcript 与流式输出语义。
 
 面向 AgentScope 用户的 OMA 接入 SDK。用户用自己的 AgentScope Agent，只需实现自己的 `OmaAgent`（装配业务所需组件），即可用 core 提供的能力严格按 OMA/CCRV2 规范接入，无需重复编写协议胶水。
 
-生产代码统一使用 SLF4J API，由 Log4j2 实现（并保留 JUL→SLF4J 桥接兼容第三方库），控制台与滚动文件同时输出；文件路径默认 `/tmp/oma-harness/logs/harness.log`，可用 `-Doma.harness.log.dir=<dir>` 覆盖。关键路径（claim、上下文加载、工具注册、审批、工具调用与结果、transcript 同步、心跳失败）都有日志。
+生产代码统一使用 SLF4J API，由 Log4j2 实现（并保留 JUL→SLF4J 桥接兼容第三方库），控制台与滚动文件同时输出；文件路径默认 `/tmp/oma-harness/logs/harness.log`，可用 `-Doma.harness.log.dir=<dir>` 覆盖。关键路径（claim、上下文加载、工具注册、审批、工具调用与结果、transcript 同步、心跳失败）都有日志。会话相关的日志统一通过 MDC 注入 `session_id`（格式 `[session=...]`），覆盖 claim 线程、事件投递线程、心跳/看门狗定时线程与模型流式调用；线程边界由 `SessionMdc` 负责设置与恢复，避免串会话。
 
 ## 模块
 
@@ -171,16 +177,28 @@ sequenceDiagram
 
 恢复只回放 `user` / `assistant` 文本。工具调用与结果由 OMA 公共事件承担，避免与 `agent.tool_use` 重复。
 
-## 尚未实现
+## 多模态图片
 
-| 端点 | 影响 |
+**输入**：`user.message.content` 的 `image` 块由 `UserContentResolver` 解析并注入 AgentScope 的 `UserMessage`，与文本块一起送入 agent；纯图片消息也会启动回合。三种 `source` 均支持：`file`（worker 凭证读取 `message-attachments/{file_id}/content` 私有附件）、`base64`（直接内联）、`url`（保持 URL 引用）。图片块统一转为 AgentScope `ImageBlock`（`Base64Source` 或 `URLSource`）。附件缺失、解码失败或来源类型不支持时单张降级跳过，不影响同批文本与其它图片。
+
+**请求序列化**：按 `api_backend` 分两路，`messages` 后端输出 Anthropic 风格 `{type:"image", source:{type:"base64"|"url", ...}}`；`chat_completions` 后端输出 OpenAI 风格 `{type:"image_url", image_url:{url:"data:<media_type>;base64,<data>"}}`。
+
+**输出**：模型返回的图片块由 `ImageBlocks` 统一解析为 OMA 结构化 image source（base64 / url / data URL），并经 `OmaChatModel.finalBlocks()` 转成 AgentScope `ImageBlock` 写入最终 `ChatResponse.content`，不再被静默丢弃——images 进入 agent state 与最终消息。各后端解析：`messages` 走 Anthropic `image.source`；`chat_completions` 支持 `delta.content` 数组中的 `image_url` 块、`image` 块与 `images` 扩展字段。
+
+**局限**：AgentScope 的 `streamEvents` 不产生图片事件，且 DSH 的 assistant 输出转换会过滤非 text/reasoning 块、前端 trace 仅渲染文本/markdown，因此模型输出的图片目前不会在前端消息时间线中显示为图片。要让前端可见需另行打通 DSH 与前端渲染。按协议约定，internal events 与 transcript 只保留文本，不写入图片原始字节。
+
+## 待完善
+
+以下能力客户端/端点均已实现，剩下的只是埋点或测试覆盖，不涉及协议设计：
+
+| 项目 | 说明 |
 |---|---|
-| `ANY .../mcp` | 外部 MCP 未代理 |
-| `PUT/HEAD/GET .../worker/image-attachments/{sha256}` | 图片附件未上传 |
-| `GET .../worker/message-attachments/{file_id}/content` | 用户消息附件未拉取 |
-| `POST .../worker/diagnostics`、`otlp` | 无诊断与 trace 上报 |
+| OTLP 自动 span 埋点 | `OtlpExporter` 提供 `export`/`exportJson`，但未自动创建或序列化 span；默认 no-op，需上层显式调用或接入 OTel SDK/agent |
+| 真实 MCP server 端到端测试 | 现有测试覆盖配置解析、响应解析与 `ToolRunner` 分发；未覆盖真实网络下 connect/list/call 全链路（仓库内有手工 mock `scripts/mcp-mock/server.py`） |
 
-这些都在 OMA 侧已有实现，SDK 只需补客户端方法，不涉及协议设计。`sign-commit`、`upstreamproxy` 与 session ingress 由沙箱内组件负责，不属于 harness。
+已实现、不属于缺口：外部 MCP 代理（`ExternalMcpClient`，配置解析／连接／`tools/list`／`tools/call`，经 `POST /v2/ccr-sessions/{id}/mcp?mcp_url=...`，工具注册为 `mcp__<prefix>__<name>` 并走审批）、诊断上报（`DiagnosticsReporter` 白名单、`POST .../worker/diagnostics`）、OTLP logs/traces 转发（`OtlpExporter`、`POST .../worker/otlp/v1/{logs,traces}`），均受 `OMA_OBSERVABILITY_ENABLED` 开关控制，默认关闭。
+
+`sign-commit`、`upstreamproxy` 与 session ingress 由沙箱内组件负责，不属于 harness。
 
 ## 需要按实际环境校准的两处
 

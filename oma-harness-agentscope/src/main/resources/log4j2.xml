@@ -2,7 +2,7 @@
 <Configuration status="WARN">
   <Properties>
     <Property name="LOG_DIR">${sys:oma.harness.log.dir:-/tmp/oma-harness/logs}</Property>
-    <Property name="LOG_PATTERN">%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{40} - %msg%n%throwable</Property>
+    <Property name="LOG_PATTERN">%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [session=%X{session_id}] %logger{40} - %msg%n%throwable</Property>
   </Properties>
   <Appenders>
     <Console name="CONSOLE" target="SYSTEM_OUT">

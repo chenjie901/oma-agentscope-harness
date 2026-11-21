@@ -174,6 +174,24 @@ class OmaAgentSupportTest {
     }
 
     @Test
+    void imageOnlyMessageStartsTurn() {
+        FakeSupport support = new FakeSupport();
+        FakeContext context = new FakeContext();
+        support.start(context);
+
+        support.deliver(userEvent("e-image", Json.parse("""
+                {"message":{"content":[
+                  {"type":"image","media_type":"image/png",
+                   "source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}
+                ]}}
+                """)));
+
+        assertEquals(List.of("TurnStarted", "SessionRunning", "TurnCompleted", "SessionIdle"),
+                context.eventKinds);
+        assertEquals(1, context.persisted.size());
+    }
+
+    @Test
     void ignoresNonUserMessageEvents() {
         FakeSupport support = new FakeSupport();
         FakeContext context = new FakeContext();

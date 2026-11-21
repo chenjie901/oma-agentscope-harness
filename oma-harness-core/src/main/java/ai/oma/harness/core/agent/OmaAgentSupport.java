@@ -29,6 +29,7 @@ import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.event.ToolResultStartEvent;
 import io.agentscope.core.event.ToolResultTextDeltaEvent;
+import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.ToolResultState;
@@ -220,12 +221,13 @@ public abstract class OmaAgentSupport implements HarnessAgent {
         if (!"user.message".equals(type)) {
             return;
         }
-        String text = extractText(event.payload());
-        if (text.isBlank()) {
+        String text = UserContentResolver.extractText(event.payload());
+        List<ContentBlock> content = UserContentResolver.resolve(event.payload(), context.attachments());
+        if (content.isEmpty()) {
             return;
         }
-        log.info("turn start event={} text_length={} thread={}",
-                event.eventId(), text.length(), context.threadId());
+        log.info("turn start event={} text_length={} blocks={} thread={}",
+                event.eventId(), text.length(), content.size(), context.threadId());
         if (refreshRequested(event.payload())) {
             refreshTools();
         }
@@ -234,7 +236,7 @@ public abstract class OmaAgentSupport implements HarnessAgent {
         context.emit(new CanonicalEvent.SessionRunning());
         try {
             compactIfNeeded();
-            Flux<AgentEvent> stream = streamTurn(text);
+            Flux<AgentEvent> stream = streamTurn(content);
             if (stream != null) {
                 stream.doOnNext(this::publishEvent).blockLast();
             }
@@ -249,11 +251,11 @@ public abstract class OmaAgentSupport implements HarnessAgent {
     }
 
     /** 驱动一个回合：用 AgentScope 2.0+ 的 streamEvents 产生细粒度事件流（旧的 stream 已废弃）。 */
-    private Flux<AgentEvent> streamTurn(String text) {
+    private Flux<AgentEvent> streamTurn(List<ContentBlock> content) {
         if (agent == null) {
             return Flux.empty();
         }
-        return agent.streamEvents(List.of(new UserMessage(text)), runtimeContext);
+        return agent.streamEvents(List.of(new UserMessage(content)), runtimeContext);
     }
 
     /**
@@ -553,29 +555,6 @@ public abstract class OmaAgentSupport implements HarnessAgent {
             }
         }
         return length;
-    }
-
-    private String extractText(JsonNode payload) {
-        JsonNode message = payload == null ? null : payload.get("message");
-        if (message == null) {
-            return "";
-        }
-        JsonNode content = message.get("content");
-        if (content == null) {
-            return "";
-        }
-        if (content.isTextual()) {
-            return content.asText();
-        }
-        StringBuilder builder = new StringBuilder();
-        for (JsonNode block : content) {
-            if (block.isTextual()) {
-                builder.append(block.asText());
-            } else if ("text".equals(Json.text(block, "type"))) {
-                builder.append(Json.text(block, "text"));
-            }
-        }
-        return builder.toString();
     }
 
     /** 当前 worker 运行配置，供接入方在 buildAgent 中读取。 */

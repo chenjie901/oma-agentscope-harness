@@ -3,12 +3,18 @@ package ai.oma.harness.core.agentscope;
 import ai.oma.harness.core.OmaConfig;
 import ai.oma.harness.core.json.Json;
 import ai.oma.harness.core.model.ModelReply;
+import ai.oma.harness.core.observability.SessionMdc;
+import ai.oma.harness.core.model.ImageBlocks;
 import ai.oma.harness.core.model.ModelRequest;
 import ai.oma.harness.core.model.OmaModelClient;
+import io.agentscope.core.message.Base64Source;
 import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
+import io.agentscope.core.message.Source;
 import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.URLSource;
 import io.agentscope.core.message.ThinkingBlock;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolUseBlock;
@@ -38,6 +44,7 @@ import java.util.UUID;
  */
 public final class OmaChatModel extends ChatModelBase {
     private final OmaModelClient client;
+    private final String sessionId;
     private volatile String model;
     private volatile Runnable requestHook = () -> {
     };
@@ -45,6 +52,7 @@ public final class OmaChatModel extends ChatModelBase {
 
     public OmaChatModel(OmaConfig config, String model, String apiBackend) {
         this.client = new OmaModelClient(config, apiBackend);
+        this.sessionId = config.sessionId();
         this.model = model;
     }
 
@@ -79,6 +87,7 @@ public final class OmaChatModel extends ChatModelBase {
                 temperature(options),
                 "main");
         return Flux.create(sink -> {
+            Map<String, String> previousMdc = SessionMdc.captureAndPut(sessionId);
             try {
                 requestHook.run();
                 ModelReply reply = client.send(request,
@@ -105,6 +114,8 @@ public final class OmaChatModel extends ChatModelBase {
                 sink.complete();
             } catch (RuntimeException e) {
                 sink.error(e);
+            } finally {
+                SessionMdc.restore(previousMdc);
             }
         });
     }
@@ -142,9 +153,41 @@ public final class OmaChatModel extends ChatModelBase {
                 }
             } else if ("redacted_thinking".equals(type)) {
                 blocks.add(ThinkingBlock.builder().thinking("[redacted thinking]").build());
+            } else if ("image".equals(type)) {
+                ImageBlock image = imageBlock(block);
+                if (image != null) {
+                    blocks.add(image);
+                }
             }
         }
         return blocks;
+    }
+
+    private ImageBlock imageBlock(Map<String, Object> block) {
+        Object sourceValue = block.get("source");
+        if (!(sourceValue instanceof Map<?, ?> source)) {
+            return null;
+        }
+        String sourceType = text(source.get("type"));
+        if ("base64".equals(sourceType)) {
+            String data = text(source.get("data"));
+            if (data.isBlank()) {
+                return null;
+            }
+            String mediaType = text(source.get("media_type"));
+            if (mediaType.isBlank()) {
+                mediaType = ImageBlocks.DEFAULT_MEDIA_TYPE;
+            }
+            return new ImageBlock(new Base64Source(mediaType, data));
+        }
+        if ("url".equals(sourceType)) {
+            String url = text(source.get("url"));
+            if (url.isBlank()) {
+                return null;
+            }
+            return new ImageBlock(new URLSource(url, text(source.get("media_type"))));
+        }
+        return null;
     }
 
     private String systemOf(List<Msg> messages) {
@@ -171,6 +214,11 @@ public final class OmaChatModel extends ChatModelBase {
             for (ContentBlock block : message.getContent()) {
                 if (block instanceof TextBlock textBlock) {
                     blocks.add(Map.of("type", "text", "text", textBlock.getText()));
+                } else if (block instanceof ImageBlock imageBlock) {
+                    Map<String, Object> image = imagePayload(imageBlock);
+                    if (image != null) {
+                        blocks.add(image);
+                    }
                 } else if (block instanceof ToolUseBlock toolUse) {
                     Map<String, Object> entry = new LinkedHashMap<>();
                     entry.put("type", "tool_use");
@@ -196,6 +244,27 @@ public final class OmaChatModel extends ChatModelBase {
             history.add(entry);
         }
         return history;
+    }
+
+    private Map<String, Object> imagePayload(ImageBlock image) {
+        Source source = image.getSource();
+        if (source instanceof Base64Source base64) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("type", "base64");
+            payload.put("media_type", base64.getMediaType());
+            payload.put("data", base64.getData());
+            return Map.of("type", "image", "source", payload);
+        }
+        if (source instanceof URLSource url) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("type", "url");
+            payload.put("url", url.getUrl());
+            if (url.getMimeType() != null && !url.getMimeType().isBlank()) {
+                payload.put("media_type", url.getMimeType());
+            }
+            return Map.of("type", "image", "source", payload);
+        }
+        return null;
     }
 
     private String outputText(ToolResultBlock block) {

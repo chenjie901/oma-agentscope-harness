@@ -143,6 +143,8 @@ public final class ChatCompletionsClient {
         }
         StringBuilder answer = new StringBuilder();
         List<Map<String, Object>> toolMessages = new ArrayList<>();
+        ArrayNode parts = Json.array();
+        boolean hasImage = false;
         for (Object item : items(content)) {
             if (item instanceof Map<?, ?> block) {
                 String type = text(block.get("type"));
@@ -153,20 +155,74 @@ public final class ChatCompletionsClient {
                     toolMessage.put("content", flatten(block.get("content")));
                     toolMessages.add(toolMessage);
                 } else if ("text".equals(type)) {
-                    answer.append(text(block.get("text")));
+                    String value = text(block.get("text"));
+                    answer.append(value);
+                    ObjectNode part = parts.addObject();
+                    part.put("type", "text");
+                    part.put("text", value);
+                } else if ("image".equals(type)) {
+                    ObjectNode imagePart = imageUrlPart(block);
+                    if (imagePart != null) {
+                        parts.add(imagePart);
+                        hasImage = true;
+                    }
                 }
             } else if (item != null) {
-                answer.append(text(item));
+                String value = text(item);
+                answer.append(value);
+                ObjectNode part = parts.addObject();
+                part.put("type", "text");
+                part.put("text", value);
             }
         }
         for (Map<String, Object> toolMessage : toolMessages) {
             messages.add(Json.parse(Json.write(toolMessage)));
         }
-        if (!answer.isEmpty()) {
+        if (hasImage) {
+            ObjectNode entry = messages.addObject();
+            entry.put("role", "user");
+            entry.set("content", parts);
+        } else if (!answer.isEmpty()) {
             ObjectNode entry = messages.addObject();
             entry.put("role", "user");
             entry.put("content", answer.toString());
         }
+    }
+
+    private ObjectNode imageUrlPart(Map<?, ?> block) {
+        Object sourceValue = block.get("source");
+        if (!(sourceValue instanceof Map<?, ?> source)) {
+            return null;
+        }
+        String sourceType = text(source.get("type"));
+        String url;
+        if ("base64".equals(sourceType)) {
+            String mediaType = firstNonBlank(text(source.get("media_type")), text(block.get("media_type")));
+            if (mediaType == null || mediaType.isBlank()) {
+                mediaType = "image/png";
+            }
+            String data = text(source.get("data"));
+            if (data == null || data.isBlank()) {
+                return null;
+            }
+            url = "data:" + mediaType + ";base64," + data;
+        } else if ("url".equals(sourceType)) {
+            url = text(source.get("url"));
+            if (url == null || url.isBlank()) {
+                return null;
+            }
+        } else {
+            return null;
+        }
+        ObjectNode part = Json.object();
+        part.put("type", "image_url");
+        ObjectNode imageUrl = part.putObject("image_url");
+        imageUrl.put("url", url);
+        return part;
+    }
+
+    private static String firstNonBlank(String first, String second) {
+        return first == null || first.isBlank() ? second : first;
     }
 
     private Map<String, Object> chatTool(Map<String, Object> tool) {
@@ -186,6 +242,7 @@ public final class ChatCompletionsClient {
                                java.util.function.Consumer<String> onReasoningDelta) throws IOException {
         StringBuilder answer = new StringBuilder();
         Map<Integer, ToolCallAccumulator> calls = new LinkedHashMap<>();
+        List<Map<String, Object>> images = new ArrayList<>();
         String finishReason = null;
         long inputTokens = 0;
         long outputTokens = 0;
@@ -214,12 +271,9 @@ public final class ChatCompletionsClient {
                 if (delta == null) {
                     continue;
                 }
-                String piece = Json.text(delta, "content");
-                if (piece != null && !piece.isEmpty()) {
-                    answer.append(piece);
-                    if (onTextDelta != null) {
-                        onTextDelta.accept(piece);
-                    }
+                appendDeltaContent(delta, answer, images, onTextDelta);
+                for (JsonNode image : Json.elements(delta, "images")) {
+                    collectImage(image, images);
                 }
                 if (onReasoningDelta != null) {
                     String reasoning = Json.text(delta, "reasoning_content");
@@ -259,6 +313,9 @@ public final class ChatCompletionsClient {
             block.put("text", answer.toString());
             content.add(block);
         }
+        for (Map<String, Object> image : images) {
+            content.add(image);
+        }
         for (ToolCallAccumulator accumulator : calls.values()) {
             if (accumulator.name == null) {
                 continue;
@@ -273,6 +330,78 @@ public final class ChatCompletionsClient {
         }
         return new ModelReply(stopReason(finishReason), List.copyOf(content),
                 inputTokens, outputTokens, Json.object(), requestId);
+    }
+
+    private void appendDeltaContent(JsonNode delta, StringBuilder answer, List<Map<String, Object>> images,
+                                    java.util.function.Consumer<String> onTextDelta) {
+        JsonNode content = delta.get("content");
+        if (content == null || content.isNull()) {
+            return;
+        }
+        if (content.isTextual()) {
+            appendText(content.asText(), answer, onTextDelta);
+            return;
+        }
+        if (!content.isArray()) {
+            return;
+        }
+        for (JsonNode part : content) {
+            if (part.isTextual()) {
+                appendText(part.asText(), answer, onTextDelta);
+                continue;
+            }
+            if (!part.isObject()) {
+                continue;
+            }
+            String type = Json.text(part, "type");
+            if ("text".equals(type)) {
+                appendText(Json.text(part, "text"), answer, onTextDelta);
+            } else if ("image".equals(type)) {
+                JsonNode source = part.get("source");
+                if (source != null && source.isObject()) {
+                    images.add(ImageBlocks.block(ImageBlocks.parseSource(source)));
+                }
+            } else if ("image_url".equals(type)) {
+                JsonNode imageUrl = part.get("image_url");
+                String url = imageUrl == null ? null : firstNonBlank(Json.text(imageUrl, "url"), Json.text(part, "url"));
+                Map<String, Object> source = ImageBlocks.parseImageUrl(url);
+                if (!source.isEmpty()) {
+                    images.add(ImageBlocks.block(source));
+                }
+            }
+        }
+    }
+
+    private void collectImage(JsonNode image, List<Map<String, Object>> images) {
+        if (image == null) {
+            return;
+        }
+        Map<String, Object> source;
+        if (image.isTextual()) {
+            source = ImageBlocks.parseImageUrl(image.asText());
+        } else if (image.isObject()) {
+            String type = Json.text(image, "type");
+            if ("image".equals(type) && image.get("source") != null) {
+                source = ImageBlocks.parseSource(image.get("source"));
+            } else {
+                String url = firstNonBlank(Json.text(image, "url"), Json.text(image, "image_url"));
+                source = ImageBlocks.parseImageUrl(url);
+            }
+        } else {
+            return;
+        }
+        if (!source.isEmpty()) {
+            images.add(ImageBlocks.block(source));
+        }
+    }
+
+    private static void appendText(String piece, StringBuilder answer, java.util.function.Consumer<String> onTextDelta) {
+        if (piece != null && !piece.isEmpty()) {
+            answer.append(piece);
+            if (onTextDelta != null) {
+                onTextDelta.accept(piece);
+            }
+        }
     }
 
     private static String truncate(String value) {
